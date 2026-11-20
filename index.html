@@ -105,8 +105,16 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .home span { color: var(--ink-2); }
 .foot { font-size: 11px; color: var(--ink-2); margin-top: auto; line-height: 1.5; }
 
-.status { position: absolute; left: 50%; top: calc(14px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: flex; gap: 10px; align-items: center; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
+.status { position: absolute; left: 50%; top: calc(64px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: flex; gap: 10px; align-items: center; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
 .status button { font: 600 13px var(--f-body); color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0; }
+.distpill { position: absolute; left: max(14px, env(safe-area-inset-left, 0px)); top: calc(14px + env(safe-area-inset-top, 0px)); background: var(--panel); box-shadow: var(--shadow); border-radius: 12px; padding: 7px 12px 8px; display: flex; align-items: baseline; gap: 10px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.distpill b { font-family: var(--f-display); font-weight: 600; font-size: 26px; line-height: 1; }
+.distpill span { font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--ground); color: var(--ink-2); }
+.distpill[data-state="ok"] span { color: var(--cycle); }
+.distpill[data-state="over"] span, .distpill[data-state="under"] span { color: var(--route); }
+.distpill.live { outline: 2px solid var(--route); }
+.toggle { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.4; cursor: pointer; }
+.toggle input { margin-top: 2px; accent-color: var(--accent); }
 .zoom { position: absolute; right: max(14px, env(safe-area-inset-right, 0px)); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; box-shadow: var(--shadow); border-radius: 10px; overflow: hidden; }
 .zoom button { width: 40px; height: 40px; border: 0; background: var(--panel); color: var(--ink); font-size: 20px; cursor: pointer; }
 .zoom button + button { border-top: 1px solid var(--line); }
@@ -167,12 +175,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       <div class="label" id="edit-label">Reroute</div>
       <ul class="help">
         <li>Drag the orange line to pull the route through a new point.</li>
-        <li>Drag a white dot to move it.</li>
-        <li>Tap a white dot to remove it.</li>
+        <li>Drag a dot to move it. Dots you place turn dark and stay put.</li>
+        <li>Tap a dot to remove it.</li>
       </ul>
+      <label class="toggle"><input type="checkbox" id="auto-fit" checked> <span>Keep the distance on target: after each edit, the white dots shift to make up the difference.</span></label>
       <div class="edit-row">
         <button class="btn small" id="undo" disabled>Undo</button>
-        <button class="btn small" id="fit-dist" disabled>Fit to distance</button>
+        <button class="btn small" id="fit-dist" disabled>Match distance</button>
         <button class="btn small" id="gpx" disabled>Export GPX</button>
       </div>
     </section>
@@ -187,6 +196,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
   <main class="mapwrap">
     <canvas id="map" aria-label="Map of the route"></canvas>
+    <div class="distpill" id="distpill" hidden aria-live="polite"><b id="pill-km">–</b><span id="pill-delta"></span></div>
     <div class="status" id="status">Loading the Verdun map…</div>
     <div class="mapkey" aria-hidden="true">
       <span><i style="background:var(--route)"></i>Your loop</span>
@@ -222,6 +232,7 @@ let G = null;            // graph
 let home = null;         // node index
 let homeLabel = "";
 let waypoints = [];      // node indices, first = home, loop returns to home
+let pinned = [];         // per waypoint: true when the runner placed or moved it (auto-fit leaves it alone)
 let legs = [];           // per leg {nodes, edges, len, catLen}
 let candidates = [], candIdx = 0;
 let undoStack = [];
@@ -389,11 +400,13 @@ function makeCandidate(theta, D, nVia) {
 }
 async function generate() {
   if (!G) return;
+  bumpRun();
   const D = +ui.dist.value * 1000;
   setStatus("Finding loops…");
   ui.gen.disabled = true; ui.another.disabled = true;
   await frame();
   const nVia = D < 6000 ? 3 : D < 14000 ? 4 : D < 30000 ? 5 : 6;
+  const myGen = ++genId;
   const base = Math.random() * Math.PI * 2, N = 8, list = [];
   for (let i = 0; i < N; i++) {
     const c = makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
@@ -401,26 +414,119 @@ async function generate() {
     if (i % 2 === 1) { setStatus(`Finding loops… ${Math.round(100 * (i + 1) / N)}%`); await frame(); }
   }
   list.sort((a, b) => a.score - b.score);
+  if (genId !== myGen) return;
   candidates = list; candIdx = 0;
   ui.gen.disabled = false;
   if (!list.length) { setStatus("No loop found here. Try another distance or move the start."); return; }
   pushUndo();
-  applyCandidate(0, true);
+  await applyCandidate(0, true);
   clearStatus();
 }
-function applyCandidate(i, fit) {
+let genId = 0;
+async function applyCandidate(i, fit) {
   const c = candidates[i];
-  waypoints = c.wps.slice(); legs = c.legs.slice();
+  bumpRun();
+  waypoints = c.wps.slice(); legs = c.legs.slice(); pinned = waypoints.map(() => false);
   ui.another.disabled = candidates.length < 2;
   afterChange(fit);
+  if (!c.tuned) {
+    await tuneDistance();
+    c.wps = waypoints.slice(); c.legs = legs.slice(); c.tuned = true;
+  }
+}
+const targetM = () => +ui.dist.value * 1000;
+const tolerance = (D) => Math.max(25, D * 0.0025);
+const totalLen = () => legs.reduce((a, l) => a + l.len, 0);
+const straight = (a, b) => Math.hypot(G.nx[a] - G.nx[b], G.ny[a] - G.ny[b]);
+
+// Junctions reachable from src within R metres of path.
+function nodesWithin(src, R) {
+  const dist = new Map([[src, 0]]), heap = new Heap(), out = [];
+  heap.push(0, src);
+  while (heap.size) {
+    const u = heap.pop(), du = dist.get(u);
+    if (du > R) break;
+    if (du > 0 && junction(u)) out.push(u);
+    for (let p = G.off[u]; p < G.off[u + 1]; p++) {
+      const e = G.adj[p], v = G.ea[e] === u ? G.eb[e] : G.ea[e], dv = du + G.el[e];
+      if (dv <= R && dv < (dist.get(v) ?? Infinity)) { dist.set(v, dv); heap.push(dv, v); }
+    }
+  }
+  return out;
+}
+
+// Nudge the unpinned via points, one junction move at a time, until the loop length
+// is within tolerance of the target. Pinned points (placed by the runner) never move.
+// runId changes on every edit or new adjustment; an adjustment whose runId is stale stops.
+let tuning = false, runId = 0;
+const bumpRun = () => ++runId;
+async function tuneDistance(includePinned) {
+  if (waypoints.length < 2) return false;
+  const my = bumpRun();
+  tuning = true;
+  const D = targetM(), tol = tolerance(D);
+  try {
+    for (let pass = 0; pass < 10; pass++) {
+      const L = totalLen(), err = L - D;
+      if (Math.abs(err) <= tol) break;
+      const n = waypoints.length;
+      let movable = [];
+      for (let i = 1; i < n; i++) if (includePinned || !pinned[i]) movable.push(i);
+      if (!movable.length) break;
+      let best = null;
+      for (const i of movable) {
+        const prev = waypoints[i - 1], cur = waypoints[i], next = waypoints[(i + 1) % n];
+        const oldLen = legs[i - 1].len + legs[i].len;
+        const ratio = Math.max(1, oldLen / ((straight(prev, cur) + straight(cur, next)) || 1));
+        const R = Math.min(3000, Math.max(250, Math.abs(err) * 1.2));
+        const cands = nodesWithin(cur, R).filter((c) => c !== prev && c !== next)
+          .map((c) => ({ c, est: Math.abs(L - oldLen + (straight(prev, c) + straight(c, next)) * ratio - D) }))
+          .sort((a, b) => a.est - b.est).slice(0, 10);
+        for (const { c } of cands) {
+          const a = route(prev, c), b = route(c, next);
+          if (!a || !b) continue;
+          const e = Math.abs(L - oldLen + a.len + b.len - D);
+          if (!best || e < best.e) best = { i, c, a, b, e };
+        }
+        await frame();
+        if (my !== runId) return false;
+      }
+      if (!best || best.e >= Math.abs(err) - 1) break;
+      waypoints[best.i] = best.c; legs[best.i - 1] = legInfo(best.a); legs[best.i] = legInfo(best.b);
+      afterChange(false);
+    }
+  } finally { if (my === runId) tuning = false; }
+  if (my !== runId) return false;
+  afterChange(false);
+  return Math.abs(totalLen() - D) <= tol;
+}
+// After an edit: keep the distance on target if the runner asked for it.
+async function autoFit() {
+  if (!ui.autoFit.checked) return;
+  const D = targetM();
+  if (Math.abs(totalLen() - D) <= tolerance(D)) return;
+  if (!pinned.some((p, i) => i > 0 && !p)) { setStatus("All points are yours, so the distance can't be adjusted. Remove one or use Match distance.", null, null, 4500); return; }
+  setStatus("Adjusting the other points…");
+  const before = runId + 1, ok = await tuneDistance(false);
+  if (runId !== before) return; // superseded by a newer edit
+  if (ok) setStatus("Other points shifted to keep the distance", "Undo", undo, 3500);
+  else setStatus("Couldn't fully match the distance with the free points", null, null, 3500);
 }
 function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
 
-// Scale the existing via points around home to hit the target distance.
-async function fitDistance() {
+// "Match distance": fine-tune free points first, then any point; scale the loop if still far off.
+async function matchDistance() {
   if (waypoints.length < 2) return;
-  const D = +ui.dist.value * 1000;
   pushUndo();
+  setStatus("Matching the distance…");
+  let ok = await tuneDistance(false);
+  if (!ok) ok = await tuneDistance(true);
+  if (!ok) { await scaleLoop(); ok = await tuneDistance(true); }
+  setStatus(ok ? "Distance matched" : "Got as close as the streets allow", null, null, 2500);
+}
+// Scale the existing via points around home towards the target distance.
+async function scaleLoop() {
+  const D = targetM();
   const hx = G.nx[home], hy = G.ny[home];
   const orig = waypoints.map((k) => [G.nx[k], G.ny[k]]);
   let s = 1, best = null;
@@ -437,15 +543,16 @@ async function fitDistance() {
     s *= Math.pow(D / t.len, 0.9);
     await frame();
   }
-  if (best) { waypoints = best.wps; legs = best.ls; afterChange(false); }
+  if (best) { waypoints = best.wps; legs = best.ls; pinned = waypoints.map(() => false); afterChange(false); }
 }
 
 // ---------------------------------------------------------------- edits
-function snapshot() { return { waypoints: waypoints.slice(), legs: legs.slice(), home }; }
+function snapshot() { return { waypoints: waypoints.slice(), legs: legs.slice(), pinned: pinned.slice(), home }; }
 function pushUndo() { if (waypoints.length) { undoStack.push(snapshot()); if (undoStack.length > 40) undoStack.shift(); } ui.undo.disabled = !undoStack.length; }
 function undo() {
   const s = undoStack.pop(); if (!s) return;
-  waypoints = s.waypoints; legs = s.legs;
+  bumpRun(); tuning = false;
+  waypoints = s.waypoints; legs = s.legs; pinned = s.pinned || waypoints.map(() => false);
   if (s.home !== home) { home = s.home; updateHomeLabel(); }
   ui.undo.disabled = !undoStack.length; afterChange(false);
 }
@@ -458,18 +565,22 @@ function rerouteAround(i) {
   }
 }
 function insertWaypoint(legIdx, node) {
+  bumpRun();
   waypoints.splice(legIdx + 1, 0, node);
   legs.splice(legIdx + 1, 0, null);
+  pinned.splice(legIdx + 1, 0, true);
   rerouteAround(legIdx + 1);
 }
 function removeWaypoint(i) {
   if (i === 0 || waypoints.length <= 2) return false;
   pushUndo();
-  waypoints.splice(i, 1); legs.splice(i, 1);
+  bumpRun();
+  waypoints.splice(i, 1); legs.splice(i, 1); pinned.splice(i, 1);
   const n = waypoints.length, li = (i - 1 + n) % n;
   const r = route(waypoints[li], waypoints[(li + 1) % n]); if (r) legs[li] = legInfo(r);
   afterChange(false);
   setStatus("Point removed", "Undo", undo, 4000);
+  autoFit();
   return true;
 }
 
@@ -477,7 +588,7 @@ function afterChange(fit) {
   buildRouteGeometry();
   renderStats();
   ui.fitDist.disabled = ui.gpx.disabled = !legs.length;
-  save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]) });
+  save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]), pinned });
   if (fit) fitRoute(); else draw();
 }
 
@@ -505,8 +616,13 @@ function buildRouteGeometry() {
 function renderStats() {
   const s = summarize(legs), D = +ui.dist.value * 1000;
   ui.actual.textContent = (s.len / 1000).toFixed(2) + " km";
-  const diff = s.len - D;
-  ui.delta.innerHTML = `Target ${(D / 1000).toFixed(1)} km<br>${Math.abs(diff) < 50 ? "on target" : (diff > 0 ? "+" : "−") + (Math.abs(diff) / 1000).toFixed(2) + " km"}`;
+  const diff = s.len - D, ok = Math.abs(diff) <= tolerance(D);
+  const dtxt = ok ? "on target" : (diff > 0 ? "+" : "−") + (Math.abs(diff) >= 1000 ? (Math.abs(diff) / 1000).toFixed(2) + " km" : Math.round(Math.abs(diff)) + " m");
+  ui.delta.innerHTML = `Target ${(D / 1000).toFixed(1)} km<br>${dtxt}`;
+  ui.pill.hidden = !legs.length;
+  ui.pillKm.textContent = (s.len / 1000).toFixed(2) + " km";
+  ui.pillDelta.textContent = ok ? `✓ ${(D / 1000).toFixed(1)} km` : `${dtxt} vs ${(D / 1000).toFixed(1)}`;
+  ui.pill.dataset.state = ok ? "ok" : diff > 0 ? "over" : "under";
   ui.bar.innerHTML = ""; ui.legend.innerHTML = "";
   for (const g of GROUPS) {
     const v = g.cats.reduce((a, c) => a + s.catLen[c], 0), pct = s.len ? 100 * v / s.len : 0;
@@ -639,7 +755,8 @@ function drawRouteMarks() {
     const [x, y] = toScreen(G.nx[k], G.ny[k]);
     if (idx === 0) return;
     ctx.beginPath(); ctx.arc(x, y, drag && drag.wp === idx ? 9 : 7, 0, 7);
-    ctx.fillStyle = "#fff"; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = colors["--route-case"]; ctx.stroke();
+    // free points: white with a dark ring; pinned (yours): dark with a white ring
+    ctx.fillStyle = pinned[idx] ? colors["--route-case"] : "#fff"; ctx.fill(); ctx.lineWidth = pinned[idx] ? 3 : 2.5; ctx.strokeStyle = pinned[idx] ? "#fff" : colors["--route-case"]; ctx.stroke();
   });
   drawHome();
 }
@@ -736,7 +853,8 @@ cv.addEventListener("pointermove", (ev) => {
   const [wx, wy] = toWorld(sx, sy), nd = nearestNode(wx, wy);
   if (nd < 0) return;
   if (drag.type === "newwp") { insertWaypoint(drag.leg, nd); drag.type = "wp"; drag.wp = drag.leg + 1; }
-  if (waypoints[drag.wp] !== nd) { waypoints[drag.wp] = nd; liveReroute(); }
+  ui.pill.classList.add("live");
+  if (waypoints[drag.wp] !== nd) { bumpRun(); tuning = false; waypoints[drag.wp] = nd; liveReroute(); }
 });
 function endPointer(ev) {
   pointers.delete(ev.pointerId);
@@ -748,10 +866,13 @@ function endPointer(ev) {
     const nd = nearestNode(wx, wy); if (nd >= 0) setHome(nd, true);
     return;
   }
+  ui.pill.classList.remove("live");
   if (d.type === "wp" && !d.moved) { removeWaypoint(d.wp); return; }
   if (d.type === "wp" && d.moved) {
     undoStack.push(d.before); ui.undo.disabled = false;
-    rerouteAround(d.wp); afterChange(false); return;
+    pinned[d.wp] = true;
+    rerouteAround(d.wp); afterChange(false); ui.pill.classList.remove("live");
+    autoFit(); return;
   }
 }
 cv.addEventListener("pointerup", endPointer);
@@ -821,7 +942,8 @@ function setDistLabel() {
 }
 function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
-    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets") });
+    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
+    pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit") });
   for (const v of PRESETS) {
     const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
     b.onclick = () => { ui.dist.value = v; onDist(true); }; ui.presets.appendChild(b);
@@ -829,15 +951,16 @@ function wire() {
   // 21.1 and 42.2 aren't on the 0.5 grid: allow them
   ui.dist.step = "0.1";
   let distTimer = 0;
-  const onDist = (now) => { setDistLabel(); save({ dist: +ui.dist.value }); if (legs.length) renderStats(); clearTimeout(distTimer); distTimer = setTimeout(generate, now ? 0 : 450); };
+  const onDist = (now) => { setDistLabel(); save({ dist: +ui.dist.value }); if (legs.length) renderStats(); clearTimeout(distTimer); distTimer = setTimeout(() => (pinned.some(Boolean) && ui.autoFit.checked ? autoFit() : generate()), now ? 0 : 450); };
   ui.dist.addEventListener("input", () => { ui.dist.value = Math.round(+ui.dist.value * 2) / 2; onDist(false); });
   $("dist-minus").onclick = () => { ui.dist.value = Math.max(2, Math.round((+ui.dist.value - 0.5) * 2) / 2); onDist(false); };
   $("dist-plus").onclick = () => { ui.dist.value = Math.min(45, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
   ui.pref.addEventListener("change", () => { setPref(+ui.pref.value / 100); save({ pref: +ui.pref.value }); generate(); });
   ui.gen.onclick = generate;
-  ui.another.onclick = () => { if (candidates.length < 2) return; pushUndo(); candIdx = (candIdx + 1) % candidates.length; applyCandidate(candIdx, true); setStatus(`Loop ${candIdx + 1} of ${candidates.length}`, null, null, 1800); };
+  ui.another.onclick = async () => { if (candidates.length < 2) return; pushUndo(); candIdx = (candIdx + 1) % candidates.length; setStatus(`Loop ${candIdx + 1} of ${candidates.length}`); await applyCandidate(candIdx, true); setStatus(`Loop ${candIdx + 1} of ${candidates.length}`, null, null, 1500); };
   ui.undo.onclick = undo;
-  ui.fitDist.onclick = fitDistance;
+  ui.fitDist.onclick = matchDistance;
+  ui.autoFit.addEventListener("change", () => { save({ autoFit: ui.autoFit.checked }); if (ui.autoFit.checked) autoFit(); });
   ui.gpx.onclick = exportGpx;
   ui.moveHome.onclick = () => {
     pickHome = !pickHome; cv.classList.toggle("pick", pickHome);
@@ -861,6 +984,7 @@ async function boot() {
   const st = store();
   if (st.dist) ui.dist.value = st.dist;
   if (st.pref != null) ui.pref.value = st.pref;
+  if (st.autoFit === false) ui.autoFit.checked = false;
   setDistLabel(); setPref(+ui.pref.value / 100);
   resize();
   try {
@@ -882,10 +1006,10 @@ async function boot() {
   view.x = G.nx[home]; view.y = G.ny[home];
   clearStatus();
   if (st.wps && st.wps.length > 1) {
-    const wps = [home];
-    for (const [x, y] of st.wps.slice(1)) { const nd = nearestNode(x, y); if (nd >= 0) wps.push(nd); }
+    const wps = [home], pins = [false];
+    st.wps.slice(1).forEach(([x, y], i) => { const nd = nearestNode(x, y); if (nd >= 0) { wps.push(nd); pins.push(!!(st.pinned && st.pinned[i + 1])); } });
     const ls = routeLoop(wps, false);
-    if (ls) { waypoints = wps; legs = ls; afterChange(true); return; }
+    if (ls) { waypoints = wps; legs = ls; pinned = pins; afterChange(true); return; }
   }
   generate();
 }
