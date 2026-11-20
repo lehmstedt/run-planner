@@ -1,9 +1,9 @@
 """Build the offline map file (map-data.json) used by the run planner page.
 
 Input: Overture Maps parquet extracts made by fetch_segments.py / fetch_context.py.
-Output: a compact JSON with a walkable routing graph, water and park polygons.
+Output: a compact JSON (gzipped when the name ends in .gz) with a walkable routing graph, water and park polygons.
 
-    python3 build_map.py <dir with segments/water/land_use/address.parquet> <out.json>
+    python3 build_map.py <dir with segments/water/land_use/address.parquet> <out.json.gz>
 """
 import sys, json, math, collections
 import pyarrow.parquet as pq
@@ -11,7 +11,7 @@ import shapely
 from shapely.geometry import box
 
 SRC, OUT = sys.argv[1], sys.argv[2]
-BBOX = (-73.66, 45.40, -73.48, 45.52)
+BBOX = (-73.74, 45.36, -73.42, 45.56)
 LON0, LAT0 = BBOX[0], BBOX[1]
 Q = 1e5  # 1e-5 degree units (~1 m)
 HOME_POSTCODE = "H4G2Z5"
@@ -332,7 +332,9 @@ data = {
     "water": water,
     "parks": parks,
 }
-with open(OUT, "w") as f:
-    json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
-import os
+import gzip, os
+raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
+with (gzip.open(OUT, "wb", 9) if OUT.endswith(".gz") else open(OUT, "wb")) as f:
+    f.write(raw)
+print("json", len(raw) // 1024, "KB")
 print("wrote", OUT, os.path.getsize(OUT) // 1024, "KB")

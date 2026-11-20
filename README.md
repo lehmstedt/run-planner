@@ -10,7 +10,7 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 ## Files
 
 - `index.html` – the app (canvas map + A* routing in the browser).
-- `map-data.json` – the routing graph, water and parks for Verdun, Sud-Ouest, Nuns' Island and downtown.
+- `map-data.json` – the routing graph, water and parks for southwest Montréal, downtown, the Plateau and the islands (about 25 × 22 km, enough for marathon loops).
 - `scripts/` – rebuilds `map-data.json` from Overture Maps (OpenStreetMap-based) GeoParquet on AWS Open Data:
 
 ```

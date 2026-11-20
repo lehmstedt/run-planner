@@ -129,7 +129,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   <aside class="rail" aria-label="Route controls">
     <header>
       <h1>Verdun Run Loops</h1>
-      <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Verdun, the Sud-Ouest, Nuns' Island and downtown.</p>
+      <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Montréal from Lachine to the Olympic Stadium, up to marathon distance.</p>
     </header>
 
     <section class="block" aria-labelledby="dist-label">
@@ -139,7 +139,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <div class="dist-val" id="dist-val">8.0<small>km</small></div>
         <button class="step" id="dist-plus" aria-label="Longer by 0.5 km">+</button>
       </div>
-      <input type="range" id="dist" min="2" max="30" step="0.5" value="8" aria-label="Target distance in kilometres">
+      <input type="range" id="dist" min="2" max="45" step="0.5" value="8" aria-label="Target distance in kilometres">
       <div class="presets" id="presets"></div>
     </section>
 
@@ -214,7 +214,7 @@ const GROUPS = [
   { name: "Quiet streets", cats: [3, 4], color: "--quiet" },
   { name: "Along busy roads", cats: [2, 5, 6, 7], color: "--busy" },
 ];
-const PRESETS = [3, 5, 8, 10, 15, 21.1];
+const PRESETS = [5, 8, 10, 15, 21.1, 30, 42.2];
 const LS = "verdun-run-loops-v1";
 
 // ---------------------------------------------------------------- state
@@ -255,7 +255,7 @@ function buildGraph(d) {
     return pts;
   });
   // spatial grid for nearest node
-  const CELL = 120, gx0 = 0, gy0 = -14000;
+  const CELL = 120, gy0 = -30000;
   const grid = new Map();
   for (let i = 0; i < n; i++) {
     if (deg[i + 1] === deg[i]) continue;
@@ -311,6 +311,7 @@ function route(s, t, penalty) {
   if (!gScore) { gScore = new Float64Array(G.n); cameFrom = new Int32Array(G.n); closedStamp = new Int32Array(G.n); openStamp = new Int32Array(G.n); }
   stamp++;
   let minF = Infinity; for (let c = 0; c < 9; c++) minF = Math.min(minF, costF[c]);
+  minF = Math.min(1, minF * 1.35); // mildly inadmissible: much faster on long legs, routes stay near-optimal
   const tx = nx[t], ty = ny[t];
   const h = (k) => Math.hypot(nx[k] - tx, ny[k] - ty) * minF;
   const heap = new Heap();
@@ -392,7 +393,7 @@ async function generate() {
   setStatus("Finding loops…");
   ui.gen.disabled = true; ui.another.disabled = true;
   await frame();
-  const nVia = D < 6000 ? 3 : D < 14000 ? 4 : 5;
+  const nVia = D < 6000 ? 3 : D < 14000 ? 4 : D < 30000 ? 5 : 6;
   const base = Math.random() * Math.PI * 2, N = 8, list = [];
   for (let i = 0; i < N; i++) {
     const c = makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
@@ -567,9 +568,10 @@ function drawNow() {
   const px = (v) => v / s;
   const z = Math.min(1, Math.max(0, (Math.log2(s) + 3) / 4)); // 0 at city scale, 1 at street scale
   if (s > 0.9) { ctx.strokeStyle = colors["--sidewalk"]; ctx.lineWidth = px(1.2); ctx.stroke(layers.sidewalk); }
-  ctx.strokeStyle = colors["--road-case"]; ctx.lineWidth = px(1.6 + 4 * z); ctx.stroke(layers.quiet);
+  const showQuiet = s > 0.09; // skip side streets when zoomed out to a whole marathon
+  if (showQuiet) { ctx.strokeStyle = colors["--road-case"]; ctx.lineWidth = px(1.6 + 4 * z); ctx.stroke(layers.quiet); }
   ctx.strokeStyle = colors["--major-case"]; ctx.lineWidth = px(2.6 + 6 * z); ctx.stroke(layers.major);
-  ctx.strokeStyle = colors["--road"]; ctx.lineWidth = px(0.8 + 3 * z); ctx.stroke(layers.quiet);
+  if (showQuiet) { ctx.strokeStyle = colors["--road"]; ctx.lineWidth = px(0.8 + 3 * z); ctx.stroke(layers.quiet); }
   ctx.strokeStyle = colors["--major"]; ctx.lineWidth = px(1.4 + 4.5 * z); ctx.stroke(layers.major);
   ctx.strokeStyle = colors["--trail"]; ctx.lineWidth = px(0.9 + 1.4 * z); ctx.stroke(layers.trail);
   ctx.strokeStyle = colors["--cycle"]; ctx.lineWidth = px(1.6 + 2.2 * z); ctx.stroke(layers.cycle);
@@ -821,16 +823,16 @@ function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets") });
   for (const v of PRESETS) {
-    const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v + " km";
+    const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
     b.onclick = () => { ui.dist.value = v; onDist(true); }; ui.presets.appendChild(b);
   }
-  // 21.1 isn't on the 0.5 grid: allow it
+  // 21.1 and 42.2 aren't on the 0.5 grid: allow them
   ui.dist.step = "0.1";
   let distTimer = 0;
   const onDist = (now) => { setDistLabel(); save({ dist: +ui.dist.value }); if (legs.length) renderStats(); clearTimeout(distTimer); distTimer = setTimeout(generate, now ? 0 : 450); };
   ui.dist.addEventListener("input", () => { ui.dist.value = Math.round(+ui.dist.value * 2) / 2; onDist(false); });
   $("dist-minus").onclick = () => { ui.dist.value = Math.max(2, Math.round((+ui.dist.value - 0.5) * 2) / 2); onDist(false); };
-  $("dist-plus").onclick = () => { ui.dist.value = Math.min(30, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
+  $("dist-plus").onclick = () => { ui.dist.value = Math.min(45, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
   ui.pref.addEventListener("change", () => { setPref(+ui.pref.value / 100); save({ pref: +ui.pref.value }); generate(); });
   ui.gen.onclick = generate;
   ui.another.onclick = () => { if (candidates.length < 2) return; pushUndo(); candIdx = (candIdx + 1) % candidates.length; applyCandidate(candIdx, true); setStatus(`Loop ${candIdx + 1} of ${candidates.length}`, null, null, 1800); };
@@ -864,7 +866,11 @@ async function boot() {
   try {
     const res = await fetch("map-data.json");
     if (!res.ok) throw new Error(res.status);
-    DATA = await res.json();
+    let buf = new Uint8Array(await res.arrayBuffer());
+    if (buf[0] === 0x1f && buf[1] === 0x8b) { // still gzipped (server didn't decode it)
+      buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    }
+    DATA = JSON.parse(new TextDecoder().decode(buf));
   } catch (e) { setStatus("The map file didn't load. Reload the page to try again."); return; }
   G = buildGraph(DATA);
   layers = buildLayers();

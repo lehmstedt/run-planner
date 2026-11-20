@@ -1,5 +1,5 @@
 import sys, pyarrow as pa, pyarrow.parquet as pq, overture
-BBOX = (-73.66, 45.40, -73.48, 45.52)
+BBOX = (-73.74, 45.36, -73.42, 45.56)
 out = sys.argv[1]
 for theme, typ, cols in [("base","water",["id","subtype","class","geometry","bbox"]),
                          ("base","land_use",["id","subtype","class","geometry","bbox"]),
