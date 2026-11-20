@@ -1,0 +1,887 @@
+<title>Verdun Run Loops</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: full-bleed offline street map with a control rail (left on desktop, bottom sheet on phones). */
+:root {
+  --ground: #e9edeb;
+  --panel: #f8faf9;
+  --ink: #1b2326;
+  --ink-2: #56636a;
+  --line: #d3dbd8;
+  --water: #b9d3df;
+  --park: #cfe2c6;
+  --road: #ffffff;
+  --road-case: #c4ccc9;
+  --major: #fff6dc;
+  --major-case: #d6c48e;
+  --sidewalk: #d9dfdc;
+  --trail: #8c8a4f;
+  --cycle: #17876a;
+  --route: #f2551d;
+  --route-case: #7a2406;
+  --accent: #f2551d;
+  --accent-ink: #ffffff;
+  --busy: #c9a227;
+  --quiet: #9aa7ac;
+  --shadow: 0 1px 2px rgb(20 30 34 / .12), 0 6px 18px rgb(20 30 34 / .10);
+  --f-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --f-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #161b1d; --panel: #1d2427; --ink: #e6ecea; --ink-2: #9aa8ad; --line: #2e383c;
+    --water: #1b3341; --park: #1f3125; --road: #3a4448; --road-case: #232b2e; --major: #5b5237; --major-case: #2b2719;
+    --sidewalk: #2d3639; --trail: #a7a56a; --cycle: #3cc79c; --route: #ff7a3d; --route-case: #2a0d02;
+    --accent: #ff7a3d; --accent-ink: #1b0b03; --busy: #d9b440; --quiet: #6f7d83;
+    --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 6px 18px rgb(0 0 0 / .35);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #161b1d; --panel: #1d2427; --ink: #e6ecea; --ink-2: #9aa8ad; --line: #2e383c;
+  --water: #1b3341; --park: #1f3125; --road: #3a4448; --road-case: #232b2e; --major: #5b5237; --major-case: #2b2719;
+  --sidewalk: #2d3639; --trail: #a7a56a; --cycle: #3cc79c; --route: #ff7a3d; --route-case: #2a0d02;
+  --accent: #ff7a3d; --accent-ink: #1b0b03; --busy: #d9b440; --quiet: #6f7d83;
+  --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 6px 18px rgb(0 0 0 / .35);
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body { background: var(--ground); color: var(--ink); font-family: var(--f-body); overflow: hidden; }
+.app { height: 100%; display: grid; grid-template-columns: 360px 1fr; }
+.rail {
+  background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto;
+  padding-block: 20px 24px; padding-left: max(18px, env(safe-area-inset-left, 0px)); padding-right: 18px;
+  display: flex; flex-direction: column; gap: 18px; min-width: 0; z-index: 2;
+}
+.mapwrap { position: relative; min-width: 0; min-height: 0; }
+canvas#map { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; display: block; }
+canvas#map.dragging { cursor: grabbing; }
+canvas#map.on-route { cursor: copy; }
+canvas#map.on-point { cursor: move; }
+canvas#map.pick { cursor: crosshair; }
+
+header h1 { font-family: var(--f-display); font-weight: 700; font-size: 30px; letter-spacing: .01em; margin: 0; line-height: 1; text-wrap: balance; }
+header p { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.45; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.block { display: flex; flex-direction: column; gap: 10px; }
+
+.dist-row { display: flex; align-items: center; gap: 10px; }
+.dist-val { font-family: var(--f-display); font-weight: 600; font-size: 54px; line-height: .9; font-variant-numeric: tabular-nums; min-width: 3.2ch; }
+.dist-val small { font-size: 22px; color: var(--ink-2); margin-left: 3px; font-weight: 500; }
+.step { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--line); background: var(--ground); color: var(--ink); font-size: 20px; cursor: pointer; display: grid; place-items: center; }
+.step:hover { border-color: var(--ink-2); }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 12px var(--f-body); padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; font-variant-numeric: tabular-nums; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.scale-ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-top: -4px; }
+
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn { font: 600 14px var(--f-body); padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--ground); color: var(--ink); cursor: pointer; }
+.btn:hover:not(:disabled) { border-color: var(--ink-2); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.small { padding: 7px 10px; font-size: 13px; border-radius: 8px; }
+.btn:focus-visible, .chip:focus-visible, .step:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.stats { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 12px; background: var(--ground); }
+.stats-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.actual { font-family: var(--f-display); font-weight: 600; font-size: 30px; font-variant-numeric: tabular-nums; }
+.delta { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; text-align: right; }
+.bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); }
+.bar span { display: block; height: 100%; }
+.legend { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.legend .k { display: flex; align-items: center; gap: 7px; }
+.legend .k i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.legend .v { color: var(--ink-2); text-align: right; }
+
+.edit-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.help { font-size: 13px; color: var(--ink-2); line-height: 1.5; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.home { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.home b { font-weight: 600; display: block; }
+.home span { color: var(--ink-2); }
+.foot { font-size: 11px; color: var(--ink-2); margin-top: auto; line-height: 1.5; }
+
+.status { position: absolute; left: 50%; top: calc(14px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: flex; gap: 10px; align-items: center; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
+.status button { font: 600 13px var(--f-body); color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0; }
+.zoom { position: absolute; right: max(14px, env(safe-area-inset-right, 0px)); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; box-shadow: var(--shadow); border-radius: 10px; overflow: hidden; }
+.zoom button { width: 40px; height: 40px; border: 0; background: var(--panel); color: var(--ink); font-size: 20px; cursor: pointer; }
+.zoom button + button { border-top: 1px solid var(--line); }
+.mapkey { position: absolute; left: max(14px, env(safe-area-inset-left, 0px)); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--panel); box-shadow: var(--shadow); border-radius: 10px; padding: 8px 10px; font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
+.mapkey span { display: flex; align-items: center; gap: 6px; }
+.mapkey i { width: 16px; height: 4px; border-radius: 2px; display: block; }
+
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+  .rail { order: 2; border-right: 0; border-top: 1px solid var(--line); max-height: 48vh; padding-block: 14px 18px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); gap: 14px; }
+  header p, .help { display: none; }
+  header h1 { font-size: 24px; }
+  .dist-val { font-size: 44px; }
+  .mapkey { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app">
+  <aside class="rail" aria-label="Route controls">
+    <header>
+      <h1>Verdun Run Loops</h1>
+      <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Verdun, the Sud-Ouest, Nuns' Island and downtown.</p>
+    </header>
+
+    <section class="block" aria-labelledby="dist-label">
+      <div class="label" id="dist-label">Distance</div>
+      <div class="dist-row">
+        <button class="step" id="dist-minus" aria-label="Shorter by 0.5 km">−</button>
+        <div class="dist-val" id="dist-val">8.0<small>km</small></div>
+        <button class="step" id="dist-plus" aria-label="Longer by 0.5 km">+</button>
+      </div>
+      <input type="range" id="dist" min="2" max="30" step="0.5" value="8" aria-label="Target distance in kilometres">
+      <div class="presets" id="presets"></div>
+    </section>
+
+    <section class="block" aria-labelledby="pref-label">
+      <div class="label" id="pref-label">Path preference</div>
+      <input type="range" id="pref" min="0" max="100" step="5" value="80" aria-label="How strongly to favour cycle paths">
+      <div class="scale-ends"><span>Shortest way</span><span>Cycle paths first</span></div>
+    </section>
+
+    <div class="actions">
+      <button class="btn primary" id="gen">New loop</button>
+      <button class="btn" id="another" disabled>Try another</button>
+    </div>
+
+    <section class="stats" aria-live="polite">
+      <div class="stats-top">
+        <div><div class="label">This loop</div><div class="actual" id="actual">–</div></div>
+        <div class="delta" id="delta"></div>
+      </div>
+      <div class="bar" id="bar"></div>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <section class="block" aria-labelledby="edit-label">
+      <div class="label" id="edit-label">Reroute</div>
+      <ul class="help">
+        <li>Drag the orange line to pull the route through a new point.</li>
+        <li>Drag a white dot to move it.</li>
+        <li>Tap a white dot to remove it.</li>
+      </ul>
+      <div class="edit-row">
+        <button class="btn small" id="undo" disabled>Undo</button>
+        <button class="btn small" id="fit-dist" disabled>Fit to distance</button>
+        <button class="btn small" id="gpx" disabled>Export GPX</button>
+      </div>
+    </section>
+
+    <section class="home">
+      <div><span>Start and finish</span><b id="home-label">5e Avenue, H4G 2Z5</b></div>
+      <button class="btn small" id="move-home">Move</button>
+    </section>
+
+    <div class="foot">Map data © OpenStreetMap contributors (ODbL), via Overture Maps release 2026-11-18. Busy roads are avoided, not forbidden; check crossings on the ground.</div>
+  </aside>
+
+  <main class="mapwrap">
+    <canvas id="map" aria-label="Map of the route"></canvas>
+    <div class="status" id="status">Loading the Verdun map…</div>
+    <div class="mapkey" aria-hidden="true">
+      <span><i style="background:var(--route)"></i>Your loop</span>
+      <span><i style="background:var(--cycle)"></i>Cycle path</span>
+      <span><i style="background:var(--trail)"></i>Trail</span>
+      <span><i style="background:var(--major-case)"></i>Busy road</span>
+    </div>
+    <div class="zoom">
+      <button id="zin" aria-label="Zoom in">+</button>
+      <button id="zout" aria-label="Zoom out">−</button>
+      <button id="zfit" aria-label="Show whole loop" style="font-size:14px">⤢</button>
+    </div>
+  </main>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- constants
+const CAT = { cycle: 0, trail: 1, sidewalk: 2, crossing: 3, quiet: 4, tertiary: 5, secondary: 6, primary: 7, steps: 8 };
+// Cost multiplier per category at full path preference (1 = neutral).
+const FULL_COST = [0.5, 0.65, 1.6, 1.2, 1.0, 1.7, 2.4, 3.2, 2.5];
+const GROUPS = [
+  { name: "Cycle paths", cats: [0], color: "--cycle" },
+  { name: "Park trails", cats: [1, 8], color: "--trail" },
+  { name: "Quiet streets", cats: [3, 4], color: "--quiet" },
+  { name: "Along busy roads", cats: [2, 5, 6, 7], color: "--busy" },
+];
+const PRESETS = [3, 5, 8, 10, 15, 21.1];
+const LS = "verdun-run-loops-v1";
+
+// ---------------------------------------------------------------- state
+let G = null;            // graph
+let home = null;         // node index
+let homeLabel = "";
+let waypoints = [];      // node indices, first = home, loop returns to home
+let legs = [];           // per leg {nodes, edges, len, catLen}
+let candidates = [], candIdx = 0;
+let undoStack = [];
+const ui = {};
+const $ = (id) => document.getElementById(id);
+
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function store() { try { return JSON.parse(localStorage.getItem(LS) || "{}"); } catch { return {}; } }
+function save(patch) { try { localStorage.setItem(LS, JSON.stringify(Object.assign(store(), patch))); } catch {} }
+
+// ---------------------------------------------------------------- graph
+function buildGraph(d) {
+  const n = d.nodes.length / 2, m = d.edges.length / 5;
+  const kx = Math.cos(45.46 * Math.PI / 180) * 111320 / d.scale, ky = 110540 / d.scale;
+  const nx = new Float32Array(n), ny = new Float32Array(n);
+  for (let i = 0; i < n; i++) { nx[i] = d.nodes[2 * i] * kx; ny[i] = -d.nodes[2 * i + 1] * ky; }
+  const side = new Uint8Array(m), ea = new Int32Array(m), eb = new Int32Array(m), ec = new Uint8Array(m), en = new Int32Array(m), el = new Float32Array(m);
+  const deg = new Int32Array(n + 1);
+  for (let i = 0; i < m; i++) {
+    ea[i] = d.edges[5 * i]; eb[i] = d.edges[5 * i + 1]; ec[i] = d.edges[5 * i + 2] % 10; side[i] = d.edges[5 * i + 2] >= 10; en[i] = d.edges[5 * i + 3]; el[i] = d.edges[5 * i + 4];
+    deg[ea[i] + 1]++; if (eb[i] !== ea[i]) deg[eb[i] + 1]++;
+  }
+  for (let i = 0; i < n; i++) deg[i + 1] += deg[i];
+  const adj = new Int32Array(deg[n]), fill = deg.slice(0, n);
+  for (let i = 0; i < m; i++) { adj[fill[ea[i]]++] = i; if (eb[i] !== ea[i]) adj[fill[eb[i]]++] = i; }
+  // edge geometry in metres (inner points)
+  const geom = d.geom.map((flat, i) => {
+    const pts = new Float32Array(flat.length);
+    let x = d.nodes[2 * ea[i]], y = d.nodes[2 * ea[i] + 1];
+    for (let k = 0; k < flat.length; k += 2) { x += flat[k]; y += flat[k + 1]; pts[k] = x * kx; pts[k + 1] = -y * ky; }
+    return pts;
+  });
+  // spatial grid for nearest node
+  const CELL = 120, gx0 = 0, gy0 = -14000;
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    if (deg[i + 1] === deg[i]) continue;
+    const key = Math.floor(nx[i] / CELL) * 100000 + Math.floor((ny[i] - gy0) / CELL);
+    let a = grid.get(key); if (!a) grid.set(key, a = []); a.push(i);
+  }
+  const polys = (list) => list.map((rings) => rings.map((flat) => {
+    const pts = new Float32Array(flat.length); let x = 0, y = 0;
+    for (let k = 0; k < flat.length; k += 2) { x += flat[k]; y += flat[k + 1]; pts[k] = x * kx; pts[k + 1] = -y * ky; }
+    return pts;
+  }));
+  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, geom, grid, CELL, gy0, names: d.names, water: polys(d.water), parks: polys(d.parks), kx, ky };
+}
+
+function nearestNode(x, y, filter) {
+  const { grid, CELL, gy0, nx, ny } = G;
+  const cx = Math.floor(x / CELL), cy = Math.floor((y - gy0) / CELL);
+  let best = -1, bd = Infinity;
+  for (let r = 0; r < 12; r++) {
+    for (let i = cx - r; i <= cx + r; i++) for (let j = cy - r; j <= cy + r; j++) {
+      if (Math.max(Math.abs(i - cx), Math.abs(j - cy)) !== r) continue;
+      const a = grid.get(i * 100000 + j); if (!a) continue;
+      for (const k of a) {
+        if (filter && !filter(k)) continue;
+        const dd = (nx[k] - x) ** 2 + (ny[k] - y) ** 2;
+        if (dd < bd) { bd = dd; best = k; }
+      }
+    }
+    if (best >= 0 && Math.sqrt(bd) < r * CELL) break;
+  }
+  return best;
+}
+// Waypoints snap to junctions (no dead ends, so loops don't grow out-and-back spurs).
+const junction = (k) => G.off[k + 1] - G.off[k] >= 3;
+const friendly = (k) => { if (!junction(k)) return false; for (let p = G.off[k]; p < G.off[k + 1]; p++) { const e = G.adj[p]; if (G.ec[e] <= 1 || (G.ec[e] === 4 && !G.side[e])) return true; } return false; };
+
+// ---------------------------------------------------------------- routing (A*)
+let costF = new Float32Array(9);
+function setPref(p) { for (let c = 0; c < 9; c++) costF[c] = 1 + p * (FULL_COST[c] - 1); }
+let gScore, cameFrom, closedStamp, openStamp, stamp = 0;
+class Heap {
+  constructor() { this.k = []; this.v = []; }
+  push(key, val) { const k = this.k, v = this.v; let i = k.length; k.push(key); v.push(val);
+    while (i > 0) { const p = (i - 1) >> 1; if (k[p] <= key) break; k[i] = k[p]; v[i] = v[p]; i = p; } k[i] = key; v[i] = val; }
+  pop() { const k = this.k, v = this.v, top = v[0], lk = k.pop(), lv = v.pop(); const n = k.length;
+    if (n) { let i = 0; while (true) { let c = 2 * i + 1; if (c >= n) break; if (c + 1 < n && k[c + 1] < k[c]) c++; if (k[c] >= lk) break; k[i] = k[c]; v[i] = v[c]; i = c; } k[i] = lk; v[i] = lv; }
+    return top; }
+  get size() { return this.v.length; }
+}
+function route(s, t, penalty) {
+  if (s === t) return { nodes: [s], edges: [], len: 0 };
+  const { nx, ny, ea, eb, ec, el, off, adj } = G;
+  if (!gScore) { gScore = new Float64Array(G.n); cameFrom = new Int32Array(G.n); closedStamp = new Int32Array(G.n); openStamp = new Int32Array(G.n); }
+  stamp++;
+  let minF = Infinity; for (let c = 0; c < 9; c++) minF = Math.min(minF, costF[c]);
+  const tx = nx[t], ty = ny[t];
+  const h = (k) => Math.hypot(nx[k] - tx, ny[k] - ty) * minF;
+  const heap = new Heap();
+  gScore[s] = 0; openStamp[s] = stamp; cameFrom[s] = -1; heap.push(h(s), s);
+  while (heap.size) {
+    const u = heap.pop();
+    if (closedStamp[u] === stamp) continue;
+    closedStamp[u] = stamp;
+    if (u === t) break;
+    const gu = gScore[u];
+    for (let p = off[u]; p < off[u + 1]; p++) {
+      const e = adj[p], v = ea[e] === u ? eb[e] : ea[e];
+      if (closedStamp[v] === stamp) continue;
+      let w = el[e] * costF[ec[e]];
+      if (penalty) { const pm = penalty.get(e); if (pm) w *= pm; }
+      const g = gu + w + 0.5;
+      if (openStamp[v] !== stamp || g < gScore[v]) { gScore[v] = g; openStamp[v] = stamp; cameFrom[v] = e; heap.push(g + h(v), v); }
+    }
+  }
+  if (closedStamp[t] !== stamp) return null;
+  const edges = [], nodes = [t]; let u = t, len = 0;
+  while (u !== s) { const e = cameFrom[u]; edges.push(e); len += el[e]; u = ea[e] === u ? eb[e] : ea[e]; nodes.push(u); }
+  edges.reverse(); nodes.reverse();
+  return { nodes, edges, len };
+}
+function legInfo(r) {
+  const catLen = new Float64Array(9);
+  for (const e of r.edges) catLen[G.ec[e]] += G.el[e];
+  r.catLen = catLen; return r;
+}
+
+// ---------------------------------------------------------------- loop generation
+function routeLoop(wps, pen) {
+  const penalty = pen ? new Map() : null, out = [];
+  for (let i = 0; i < wps.length; i++) {
+    const r = route(wps[i], wps[(i + 1) % wps.length], penalty);
+    if (!r) return null;
+    out.push(legInfo(r));
+    if (penalty) for (const e of r.edges) penalty.set(e, (penalty.get(e) || 1) * 4);
+  }
+  return out;
+}
+function summarize(ls) {
+  const catLen = new Float64Array(9); let len = 0; const seen = new Map(); let overlap = 0;
+  for (const l of ls) { len += l.len; for (let c = 0; c < 9; c++) catLen[c] += l.catLen[c];
+    for (const e of l.edges) { if (seen.has(e)) overlap += G.el[e]; seen.set(e, 1); } }
+  return { len, catLen, overlap };
+}
+function makeCandidate(theta, D, nVia) {
+  const hx = G.nx[home], hy = G.ny[home];
+  let r = D / (2 * Math.PI * 1.25), best = null;
+  for (let it = 0; it < 5; it++) {
+    const cx = hx + r * Math.cos(theta), cy = hy + r * Math.sin(theta);
+    const wps = [home];
+    for (let k = 1; k <= nVia; k++) {
+      const a = theta + Math.PI + k * 2 * Math.PI / (nVia + 1);
+      const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+      let nd = nearestNode(px, py, friendly);
+      if (nd < 0 || Math.hypot(G.nx[nd] - px, G.ny[nd] - py) > 250) nd = nearestNode(px, py, junction);
+      if (nd >= 0 && nd !== wps[wps.length - 1]) wps.push(nd);
+    }
+    const ls = routeLoop(wps, true);
+    if (!ls) { r *= 0.8; continue; }
+    const s = summarize(ls);
+    const err = Math.abs(s.len - D) / D;
+    if (!best || err < best.err) best = { wps, legs: ls, err, ...s };
+    if (err < 0.025) break;
+    r *= Math.pow(D / s.len, 0.9);
+  }
+  if (!best) return null;
+  const busy = (best.catLen[2] + best.catLen[5] + best.catLen[6] + best.catLen[7]) / best.len;
+  const path = (best.catLen[0] + best.catLen[1]) / best.len;
+  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5;
+  return best;
+}
+async function generate() {
+  if (!G) return;
+  const D = +ui.dist.value * 1000;
+  setStatus("Finding loops…");
+  ui.gen.disabled = true; ui.another.disabled = true;
+  await frame();
+  const nVia = D < 6000 ? 3 : D < 14000 ? 4 : 5;
+  const base = Math.random() * Math.PI * 2, N = 8, list = [];
+  for (let i = 0; i < N; i++) {
+    const c = makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
+    if (c) list.push(c);
+    if (i % 2 === 1) { setStatus(`Finding loops… ${Math.round(100 * (i + 1) / N)}%`); await frame(); }
+  }
+  list.sort((a, b) => a.score - b.score);
+  candidates = list; candIdx = 0;
+  ui.gen.disabled = false;
+  if (!list.length) { setStatus("No loop found here. Try another distance or move the start."); return; }
+  pushUndo();
+  applyCandidate(0, true);
+  clearStatus();
+}
+function applyCandidate(i, fit) {
+  const c = candidates[i];
+  waypoints = c.wps.slice(); legs = c.legs.slice();
+  ui.another.disabled = candidates.length < 2;
+  afterChange(fit);
+}
+function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
+
+// Scale the existing via points around home to hit the target distance.
+async function fitDistance() {
+  if (waypoints.length < 2) return;
+  const D = +ui.dist.value * 1000;
+  pushUndo();
+  const hx = G.nx[home], hy = G.ny[home];
+  const orig = waypoints.map((k) => [G.nx[k], G.ny[k]]);
+  let s = 1, best = null;
+  for (let it = 0; it < 6; it++) {
+    const wps = [home];
+    for (let i = 1; i < orig.length; i++) {
+      const nd = nearestNode(hx + (orig[i][0] - hx) * s, hy + (orig[i][1] - hy) * s);
+      if (nd >= 0 && nd !== wps[wps.length - 1]) wps.push(nd);
+    }
+    const ls = routeLoop(wps, false); if (!ls) break;
+    const t = summarize(ls), err = Math.abs(t.len - D) / D;
+    if (!best || err < best.err) best = { wps, ls, err };
+    if (err < 0.02) break;
+    s *= Math.pow(D / t.len, 0.9);
+    await frame();
+  }
+  if (best) { waypoints = best.wps; legs = best.ls; afterChange(false); }
+}
+
+// ---------------------------------------------------------------- edits
+function snapshot() { return { waypoints: waypoints.slice(), legs: legs.slice(), home }; }
+function pushUndo() { if (waypoints.length) { undoStack.push(snapshot()); if (undoStack.length > 40) undoStack.shift(); } ui.undo.disabled = !undoStack.length; }
+function undo() {
+  const s = undoStack.pop(); if (!s) return;
+  waypoints = s.waypoints; legs = s.legs;
+  if (s.home !== home) { home = s.home; updateHomeLabel(); }
+  ui.undo.disabled = !undoStack.length; afterChange(false);
+}
+function rerouteAround(i) {
+  // recompute legs touching waypoint i
+  const n = waypoints.length;
+  for (const li of [(i - 1 + n) % n, i]) {
+    const r = route(waypoints[li], waypoints[(li + 1) % n]);
+    if (r) legs[li] = legInfo(r);
+  }
+}
+function insertWaypoint(legIdx, node) {
+  waypoints.splice(legIdx + 1, 0, node);
+  legs.splice(legIdx + 1, 0, null);
+  rerouteAround(legIdx + 1);
+}
+function removeWaypoint(i) {
+  if (i === 0 || waypoints.length <= 2) return false;
+  pushUndo();
+  waypoints.splice(i, 1); legs.splice(i, 1);
+  const n = waypoints.length, li = (i - 1 + n) % n;
+  const r = route(waypoints[li], waypoints[(li + 1) % n]); if (r) legs[li] = legInfo(r);
+  afterChange(false);
+  setStatus("Point removed", "Undo", undo, 4000);
+  return true;
+}
+
+function afterChange(fit) {
+  buildRouteGeometry();
+  renderStats();
+  ui.fitDist.disabled = ui.gpx.disabled = !legs.length;
+  save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]) });
+  if (fit) fitRoute(); else draw();
+}
+
+// ---------------------------------------------------------------- route geometry
+let routePts = new Float32Array(0), routeCum = new Float32Array(0), legStart = [];
+function edgePoints(e, fromNode, out) {
+  const g = G.geom[e], fwd = G.ea[e] === fromNode;
+  if (fwd) { for (let k = 0; k < g.length; k += 2) out.push(g[k], g[k + 1]); out.push(G.nx[G.eb[e]], G.ny[G.eb[e]]); }
+  else { for (let k = g.length - 2; k >= 0; k -= 2) out.push(g[k], g[k + 1]); out.push(G.nx[G.ea[e]], G.ny[G.ea[e]]); }
+}
+function buildRouteGeometry() {
+  const pts = []; legStart = [];
+  if (waypoints.length) pts.push(G.nx[waypoints[0]], G.ny[waypoints[0]]);
+  legs.forEach((l) => {
+    legStart.push(pts.length / 2 - 1);
+    for (let i = 0; i < l.edges.length; i++) edgePoints(l.edges[i], l.nodes[i], pts);
+  });
+  legStart.push(pts.length / 2 - 1);
+  routePts = Float32Array.from(pts);
+  routeCum = new Float32Array(pts.length / 2);
+  for (let i = 1; i < routeCum.length; i++) routeCum[i] = routeCum[i - 1] + Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+}
+
+// ---------------------------------------------------------------- stats
+function renderStats() {
+  const s = summarize(legs), D = +ui.dist.value * 1000;
+  ui.actual.textContent = (s.len / 1000).toFixed(2) + " km";
+  const diff = s.len - D;
+  ui.delta.innerHTML = `Target ${(D / 1000).toFixed(1)} km<br>${Math.abs(diff) < 50 ? "on target" : (diff > 0 ? "+" : "−") + (Math.abs(diff) / 1000).toFixed(2) + " km"}`;
+  ui.bar.innerHTML = ""; ui.legend.innerHTML = "";
+  for (const g of GROUPS) {
+    const v = g.cats.reduce((a, c) => a + s.catLen[c], 0), pct = s.len ? 100 * v / s.len : 0;
+    const span = document.createElement("span"); span.style.width = pct + "%"; span.style.background = `var(${g.color})`; ui.bar.appendChild(span);
+    ui.legend.insertAdjacentHTML("beforeend", `<div class="k"><i style="background:var(${g.color})"></i>${g.name}</div><div class="v">${(v / 1000).toFixed(1)} km · ${Math.round(pct)}%</div>`);
+  }
+}
+
+// ---------------------------------------------------------------- map view
+const cv = $("map"), ctx = cv.getContext("2d");
+const view = { x: 0, y: 0, s: 0.3 }; // centre in metres, pixels per metre
+let W = 0, H = 0, DPR = 1, layers = null, colors = {};
+function resize() {
+  const r = cv.getBoundingClientRect(); DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = r.width; H = r.height; cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); draw();
+}
+function readColors() { for (const k of ["--ground", "--water", "--park", "--road", "--road-case", "--major", "--major-case", "--sidewalk", "--trail", "--cycle", "--route", "--route-case", "--ink", "--panel", "--ink-2"]) colors[k] = css(k); }
+function buildLayers() {
+  const mk = () => new Path2D();
+  const L = { water: mk(), parks: mk(), sidewalk: mk(), quiet: mk(), major: mk(), trail: mk(), cycle: mk() };
+  const poly = (path, list) => { for (const rings of list) for (const r of rings) { path.moveTo(r[0], r[1]); for (let k = 2; k < r.length; k += 2) path.lineTo(r[k], r[k + 1]); path.closePath(); } };
+  poly(L.water, G.water); poly(L.parks, G.parks);
+  const pick = [ "cycle", "trail", "sidewalk", "sidewalk", "quiet", "major", "major", "major", "trail" ];
+  for (let e = 0; e < G.m; e++) {
+    const p = G.side[e] ? L.sidewalk : L[pick[G.ec[e]]], g = G.geom[e];
+    p.moveTo(G.nx[G.ea[e]], G.ny[G.ea[e]]);
+    for (let k = 0; k < g.length; k += 2) p.lineTo(g[k], g[k + 1]);
+    p.lineTo(G.nx[G.eb[e]], G.ny[G.eb[e]]);
+  }
+  // labels: named edges, long enough
+  const labels = [];
+  for (let e = 0; e < G.m; e++) {
+    const c = G.ec[e]; if (!G.en[e] || G.el[e] < 140 || G.side[e] || c === 2 || c === 3) continue;
+    const g = G.geom[e], pts = [G.nx[G.ea[e]], G.ny[G.ea[e]], ...g, G.nx[G.eb[e]], G.ny[G.eb[e]]];
+    const i = Math.max(0, Math.floor(pts.length / 4) - 1) * 2;
+    const x = (pts[i] + pts[i + 2]) / 2, y = (pts[i + 1] + pts[i + 3]) / 2;
+    let a = Math.atan2(pts[i + 3] - pts[i + 1], pts[i + 2] - pts[i]); if (a > Math.PI / 2) a -= Math.PI; if (a < -Math.PI / 2) a += Math.PI;
+    labels.push({ x, y, a, t: G.names[G.en[e]], major: c >= 5, len: G.el[e] });
+  }
+  labels.sort((p, q) => (q.major - p.major) || (q.len - p.len));
+  L.labels = labels;
+  return L;
+}
+const toScreen = (x, y) => [(x - view.x) * view.s + W / 2, (y - view.y) * view.s + H / 2];
+const toWorld = (sx, sy) => [(sx - W / 2) / view.s + view.x, (sy - H / 2) / view.s + view.y];
+
+let drawQueued = false;
+function draw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawNow(); }); } }
+function drawNow() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = colors["--ground"]; ctx.fillRect(0, 0, W, H);
+  if (!layers) return;
+  const s = view.s;
+  ctx.save();
+  ctx.setTransform(DPR * s, 0, 0, DPR * s, DPR * (W / 2 - view.x * s), DPR * (H / 2 - view.y * s));
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.fillStyle = colors["--park"]; ctx.fill(layers.parks, "evenodd");
+  ctx.fillStyle = colors["--water"]; ctx.fill(layers.water, "evenodd");
+  const px = (v) => v / s;
+  const z = Math.min(1, Math.max(0, (Math.log2(s) + 3) / 4)); // 0 at city scale, 1 at street scale
+  if (s > 0.9) { ctx.strokeStyle = colors["--sidewalk"]; ctx.lineWidth = px(1.2); ctx.stroke(layers.sidewalk); }
+  ctx.strokeStyle = colors["--road-case"]; ctx.lineWidth = px(1.6 + 4 * z); ctx.stroke(layers.quiet);
+  ctx.strokeStyle = colors["--major-case"]; ctx.lineWidth = px(2.6 + 6 * z); ctx.stroke(layers.major);
+  ctx.strokeStyle = colors["--road"]; ctx.lineWidth = px(0.8 + 3 * z); ctx.stroke(layers.quiet);
+  ctx.strokeStyle = colors["--major"]; ctx.lineWidth = px(1.4 + 4.5 * z); ctx.stroke(layers.major);
+  ctx.strokeStyle = colors["--trail"]; ctx.lineWidth = px(0.9 + 1.4 * z); ctx.stroke(layers.trail);
+  ctx.strokeStyle = colors["--cycle"]; ctx.lineWidth = px(1.6 + 2.2 * z); ctx.stroke(layers.cycle);
+  // route
+  if (routePts.length >= 4) {
+    const rp = new Path2D(); rp.moveTo(routePts[0], routePts[1]);
+    for (let k = 2; k < routePts.length; k += 2) rp.lineTo(routePts[k], routePts[k + 1]);
+    ctx.strokeStyle = colors["--route-case"]; ctx.globalAlpha = 0.35; ctx.lineWidth = px(9); ctx.stroke(rp);
+    ctx.globalAlpha = 1; ctx.strokeStyle = colors["--route"]; ctx.lineWidth = px(5); ctx.stroke(rp);
+  }
+  ctx.restore();
+  drawLabels();
+  drawRouteMarks();
+}
+function drawLabels() {
+  if (view.s < 0.55) return;
+  const boxes = [];
+  ctx.font = `500 ${view.s > 1.5 ? 12 : 11}px ${css("--f-body")}`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 3; ctx.strokeStyle = colors["--ground"]; ctx.fillStyle = colors["--ink-2"];
+  let drawn = 0;
+  for (const l of layers.labels) {
+    if (!l.major && view.s < 0.9) continue;
+    const [x, y] = toScreen(l.x, l.y);
+    if (x < -50 || y < -20 || x > W + 50 || y > H + 20) continue;
+    const w = ctx.measureText(l.t).width;
+    if (w > l.len * view.s * 0.9) continue;
+    const r = w / 2 + 6;
+    if (boxes.some((b) => Math.abs(b[0] - x) < b[2] + r && Math.abs(b[1] - y) < 16)) continue;
+    boxes.push([x, y, r]);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(l.a); ctx.strokeText(l.t, 0, 0); ctx.fillText(l.t, 0, 0); ctx.restore();
+    if (++drawn > 160) break;
+  }
+}
+function drawRouteMarks() {
+  if (routePts.length < 4) return;
+  const total = routeCum[routeCum.length - 1];
+  // km markers
+  ctx.font = `700 11px ${css("--f-display")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const step = view.s < 0.12 ? 5000 : view.s < 0.25 ? 2000 : 1000;
+  let i = 0;
+  for (let d = step; d < total - step * 0.3; d += step) {
+    while (i < routeCum.length - 1 && routeCum[i + 1] < d) i++;
+    const t = (d - routeCum[i]) / ((routeCum[i + 1] - routeCum[i]) || 1);
+    const [x, y] = toScreen(routePts[2 * i] + t * (routePts[2 * i + 2] - routePts[2 * i]), routePts[2 * i + 1] + t * (routePts[2 * i + 3] - routePts[2 * i + 1]));
+    ctx.fillStyle = colors["--panel"]; ctx.strokeStyle = colors["--route"]; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = colors["--ink"]; ctx.fillText(String(d / 1000), x, y + 0.5);
+  }
+  // direction chevrons
+  const gap = 90 / view.s; i = 0;
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.8;
+  for (let d = gap / 2; d < total; d += gap) {
+    while (i < routeCum.length - 1 && routeCum[i + 1] < d) i++;
+    const dx = routePts[2 * i + 2] - routePts[2 * i], dy = routePts[2 * i + 3] - routePts[2 * i + 1];
+    const t = (d - routeCum[i]) / ((routeCum[i + 1] - routeCum[i]) || 1);
+    const [x, y] = toScreen(routePts[2 * i] + t * dx, routePts[2 * i + 1] + t * dy);
+    if (x < 0 || y < 0 || x > W || y > H) continue;
+    const a = Math.atan2(dy, dx);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+    ctx.beginPath(); ctx.moveTo(-2.5, -3); ctx.lineTo(1.5, 0); ctx.lineTo(-2.5, 3); ctx.stroke(); ctx.restore();
+  }
+  // waypoints
+  waypoints.forEach((k, idx) => {
+    const [x, y] = toScreen(G.nx[k], G.ny[k]);
+    if (idx === 0) return;
+    ctx.beginPath(); ctx.arc(x, y, drag && drag.wp === idx ? 9 : 7, 0, 7);
+    ctx.fillStyle = "#fff"; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = colors["--route-case"]; ctx.stroke();
+  });
+  drawHome();
+}
+function drawHome() {
+  if (home == null) return;
+  const [x, y] = toScreen(G.nx[home], G.ny[home]);
+  ctx.beginPath(); ctx.arc(x, y, 11, 0, 7); ctx.fillStyle = colors["--ink"]; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = colors["--panel"]; ctx.stroke();
+  // little house glyph
+  ctx.fillStyle = colors["--panel"]; ctx.beginPath();
+  ctx.moveTo(x - 5, y); ctx.lineTo(x, y - 5); ctx.lineTo(x + 5, y); ctx.lineTo(x + 3.5, y); ctx.lineTo(x + 3.5, y + 4.5); ctx.lineTo(x - 3.5, y + 4.5); ctx.lineTo(x - 3.5, y); ctx.closePath(); ctx.fill();
+}
+function fitRoute() {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const pts = routePts.length ? routePts : [G.nx[home], G.ny[home]];
+  for (let k = 0; k < pts.length; k += 2) { x0 = Math.min(x0, pts[k]); x1 = Math.max(x1, pts[k]); y0 = Math.min(y0, pts[k + 1]); y1 = Math.max(y1, pts[k + 1]); }
+  view.x = (x0 + x1) / 2; view.y = (y0 + y1) / 2;
+  const pad = 60;
+  view.s = Math.min(3, Math.max(0.05, Math.min((W - pad * 2) / Math.max(200, x1 - x0), (H - pad * 2) / Math.max(200, y1 - y0))));
+  draw();
+}
+function zoomAt(f, sx, sy) {
+  const [wx, wy] = toWorld(sx, sy);
+  view.s = Math.min(6, Math.max(0.04, view.s * f));
+  view.x = wx - (sx - W / 2) / view.s; view.y = wy - (sy - H / 2) / view.s;
+  draw();
+}
+
+// ---------------------------------------------------------------- pointer interaction
+let drag = null, pointers = new Map(), pinch = null, pickHome = false;
+function hitWaypoint(sx, sy) {
+  for (let i = waypoints.length - 1; i >= 1; i--) {
+    const [x, y] = toScreen(G.nx[waypoints[i]], G.ny[waypoints[i]]);
+    if (Math.hypot(x - sx, y - sy) < 16) return i;
+  }
+  return -1;
+}
+function hitRoute(sx, sy) {
+  const [wx, wy] = toWorld(sx, sy), tol = 12 / view.s;
+  let best = -1, bd = tol;
+  for (let i = 0; i < routePts.length / 2 - 1; i++) {
+    const ax = routePts[2 * i], ay = routePts[2 * i + 1], bx = routePts[2 * i + 2], by = routePts[2 * i + 3];
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((wx - ax) * dx + (wy - ay) * dy) / L2));
+    const d = Math.hypot(ax + t * dx - wx, ay + t * dy - wy);
+    if (d < bd) { bd = d; best = i; }
+  }
+  if (best < 0) return -1;
+  for (let l = 0; l < legStart.length - 1; l++) if (best < legStart[l + 1]) return l;
+  return legs.length - 1;
+}
+let liveQueued = false;
+function liveReroute() {
+  if (liveQueued) return; liveQueued = true;
+  requestAnimationFrame(() => { liveQueued = false; if (!drag || drag.wp == null) return; rerouteAround(drag.wp); buildRouteGeometry(); renderStats(); draw(); });
+}
+cv.addEventListener("pointerdown", (ev) => {
+  cv.setPointerCapture(ev.pointerId);
+  const r = cv.getBoundingClientRect(), sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  pointers.set(ev.pointerId, [sx, sy]);
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), s: view.s }; drag = null; return;
+  }
+  if (!G) return;
+  if (pickHome) { drag = { type: "tap-home", sx, sy, moved: false, vx: view.x, vy: view.y }; return; }
+  const wp = hitWaypoint(sx, sy);
+  if (wp > 0) { drag = { type: "wp", wp, sx, sy, moved: false, before: snapshot() }; return; }
+  const leg = routePts.length ? hitRoute(sx, sy) : -1;
+  if (leg >= 0) { drag = { type: "newwp", leg, sx, sy, moved: false, before: snapshot() }; return; }
+  drag = { type: "pan", sx, sy, vx: view.x, vy: view.y, moved: false };
+  cv.classList.add("dragging");
+});
+cv.addEventListener("pointermove", (ev) => {
+  const r = cv.getBoundingClientRect(), sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, [sx, sy]);
+  if (pinch && pointers.size === 2) {
+    const [a, b] = [...pointers.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    zoomAt((pinch.s * d / pinch.d) / view.s, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); return;
+  }
+  if (!drag) {
+    if (!G || ev.pointerType !== "mouse") return;
+    cv.classList.toggle("pick", pickHome);
+    const onP = !pickHome && hitWaypoint(sx, sy) > 0, onR = !pickHome && !onP && routePts.length && hitRoute(sx, sy) >= 0;
+    cv.classList.toggle("on-point", onP); cv.classList.toggle("on-route", !!onR);
+    return;
+  }
+  const moved = Math.hypot(sx - drag.sx, sy - drag.sy) > 5;
+  if (!drag.moved && !moved) return;
+  drag.moved = true;
+  if (drag.type === "pan" || drag.type === "tap-home") {
+    view.x = drag.vx - (sx - drag.sx) / view.s; view.y = drag.vy - (sy - drag.sy) / view.s; draw(); return;
+  }
+  const [wx, wy] = toWorld(sx, sy), nd = nearestNode(wx, wy);
+  if (nd < 0) return;
+  if (drag.type === "newwp") { insertWaypoint(drag.leg, nd); drag.type = "wp"; drag.wp = drag.leg + 1; }
+  if (waypoints[drag.wp] !== nd) { waypoints[drag.wp] = nd; liveReroute(); }
+});
+function endPointer(ev) {
+  pointers.delete(ev.pointerId);
+  if (pinch) { if (pointers.size < 2) pinch = null; drag = null; return; }
+  cv.classList.remove("dragging");
+  const d = drag; drag = null; if (!d) return;
+  if (d.type === "tap-home" && !d.moved) {
+    const r = cv.getBoundingClientRect(), [wx, wy] = toWorld(ev.clientX - r.left, ev.clientY - r.top);
+    const nd = nearestNode(wx, wy); if (nd >= 0) setHome(nd, true);
+    return;
+  }
+  if (d.type === "wp" && !d.moved) { removeWaypoint(d.wp); return; }
+  if (d.type === "wp" && d.moved) {
+    undoStack.push(d.before); ui.undo.disabled = false;
+    rerouteAround(d.wp); afterChange(false); return;
+  }
+}
+cv.addEventListener("pointerup", endPointer);
+cv.addEventListener("pointercancel", endPointer);
+cv.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const r = cv.getBoundingClientRect();
+  zoomAt(Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0015)), ev.clientX - r.left, ev.clientY - r.top);
+}, { passive: false });
+
+// ---------------------------------------------------------------- home
+function setHome(nd, userPicked) {
+  pushUndo();
+  home = nd; pickHome = false; cv.classList.remove("pick");
+  ui.moveHome.textContent = "Move";
+  homeLabel = userPicked ? describeNode(nd) : homeLabel;
+  updateHomeLabel();
+  save({ home: [G.nx[nd], G.ny[nd]], homeLabel });
+  clearStatus();
+  generate();
+}
+function describeNode(nd) {
+  const names = new Set();
+  for (let p = G.off[nd]; p < G.off[nd + 1]; p++) { const nm = G.names[G.en[G.adj[p]]]; if (nm) names.add(nm); }
+  return names.size ? "Near " + [...names].slice(0, 2).join(" / ") : "Custom start";
+}
+function updateHomeLabel() { ui.homeLabel.textContent = homeLabel; }
+
+// ---------------------------------------------------------------- GPX export
+async function exportGpx() {
+  const { origin, scale } = DATA;
+  const pts = [];
+  for (let k = 0; k < routePts.length; k += 2) {
+    const lon = origin[0] + routePts[k] / G.kx / scale, lat = origin[1] - routePts[k + 1] / G.ky / scale;
+    pts.push(`<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`);
+  }
+  const km = (routeCum[routeCum.length - 1] / 1000).toFixed(1);
+  const name = `Verdun loop ${km} km`;
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Verdun Run Loops" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name></metadata>\n<trk><name>${name}</name><type>running</type><trkseg>\n${pts.join("\n")}\n</trkseg></trk>\n</gpx>\n`;
+  const fname = `verdun-loop-${km}km.gpx`;
+  try {
+    const dl = await window.claude?.use?.("downloads");
+    if (dl) { await dl.save({ filename: fname, data: gpx }); setStatus("GPX saved", null, null, 2500); return; }
+  } catch (e) { if (e && e.code === "declined") return; }
+  try {
+    const url = URL.createObjectURL(new Blob([gpx], { type: "application/gpx+xml" }));
+    const a = document.createElement("a"); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch { setStatus("This viewer can't save files"); }
+}
+
+// ---------------------------------------------------------------- status toast
+let statusTimer = 0;
+function setStatus(text, actionLabel, action, ms) {
+  clearTimeout(statusTimer);
+  ui.status.hidden = false; ui.status.textContent = text;
+  if (actionLabel) { const b = document.createElement("button"); b.textContent = actionLabel; b.onclick = () => { action(); clearStatus(); }; ui.status.appendChild(b); }
+  if (ms) statusTimer = setTimeout(clearStatus, ms);
+}
+function clearStatus() { clearTimeout(statusTimer); ui.status.hidden = true; }
+
+// ---------------------------------------------------------------- controls
+function setDistLabel() {
+  const v = +ui.dist.value;
+  ui.distVal.innerHTML = `${v.toFixed(1)}<small>km</small>`;
+  for (const b of ui.presets.children) b.setAttribute("aria-pressed", String(+b.dataset.v === v));
+}
+function wire() {
+  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
+    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets") });
+  for (const v of PRESETS) {
+    const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v + " km";
+    b.onclick = () => { ui.dist.value = v; onDist(true); }; ui.presets.appendChild(b);
+  }
+  // 21.1 isn't on the 0.5 grid: allow it
+  ui.dist.step = "0.1";
+  let distTimer = 0;
+  const onDist = (now) => { setDistLabel(); save({ dist: +ui.dist.value }); if (legs.length) renderStats(); clearTimeout(distTimer); distTimer = setTimeout(generate, now ? 0 : 450); };
+  ui.dist.addEventListener("input", () => { ui.dist.value = Math.round(+ui.dist.value * 2) / 2; onDist(false); });
+  $("dist-minus").onclick = () => { ui.dist.value = Math.max(2, Math.round((+ui.dist.value - 0.5) * 2) / 2); onDist(false); };
+  $("dist-plus").onclick = () => { ui.dist.value = Math.min(30, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
+  ui.pref.addEventListener("change", () => { setPref(+ui.pref.value / 100); save({ pref: +ui.pref.value }); generate(); });
+  ui.gen.onclick = generate;
+  ui.another.onclick = () => { if (candidates.length < 2) return; pushUndo(); candIdx = (candIdx + 1) % candidates.length; applyCandidate(candIdx, true); setStatus(`Loop ${candIdx + 1} of ${candidates.length}`, null, null, 1800); };
+  ui.undo.onclick = undo;
+  ui.fitDist.onclick = fitDistance;
+  ui.gpx.onclick = exportGpx;
+  ui.moveHome.onclick = () => {
+    pickHome = !pickHome; cv.classList.toggle("pick", pickHome);
+    ui.moveHome.textContent = pickHome ? "Cancel" : "Move";
+    if (pickHome) setStatus("Tap the map where your runs start"); else clearStatus();
+  };
+  $("zin").onclick = () => zoomAt(1.6, W / 2, H / 2);
+  $("zout").onclick = () => zoomAt(1 / 1.6, W / 2, H / 2);
+  $("zfit").onclick = fitRoute;
+  window.addEventListener("resize", resize);
+  const mq = matchMedia("(prefers-color-scheme: dark)");
+  const recolor = () => { readColors(); draw(); };
+  mq.addEventListener?.("change", recolor);
+  new MutationObserver(recolor).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+}
+
+// ---------------------------------------------------------------- boot
+let DATA = null;
+async function boot() {
+  wire(); readColors();
+  const st = store();
+  if (st.dist) ui.dist.value = st.dist;
+  if (st.pref != null) ui.pref.value = st.pref;
+  setDistLabel(); setPref(+ui.pref.value / 100);
+  resize();
+  try {
+    const res = await fetch("map-data.json");
+    if (!res.ok) throw new Error(res.status);
+    DATA = await res.json();
+  } catch (e) { setStatus("The map file didn't load. Reload the page to try again."); return; }
+  G = buildGraph(DATA);
+  layers = buildLayers();
+  const h = DATA.home;
+  const hx = (h.lon - DATA.origin[0]) * DATA.scale * G.kx, hy = -(h.lat - DATA.origin[1]) * DATA.scale * G.ky;
+  home = st.home ? nearestNode(st.home[0], st.home[1]) : nearestNode(hx, hy);
+  homeLabel = st.home ? (st.homeLabel || "Custom start") : h.label;
+  updateHomeLabel();
+  view.x = G.nx[home]; view.y = G.ny[home];
+  clearStatus();
+  if (st.wps && st.wps.length > 1) {
+    const wps = [home];
+    for (const [x, y] of st.wps.slice(1)) { const nd = nearestNode(x, y); if (nd >= 0) wps.push(nd); }
+    const ls = routeLoop(wps, false);
+    if (ls) { waypoints = wps; legs = ls; afterChange(true); return; }
+  }
+  generate();
+}
+boot();
+</script>
