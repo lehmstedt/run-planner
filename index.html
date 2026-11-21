@@ -183,6 +183,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <button class="btn small" id="undo" disabled>Undo</button>
         <button class="btn small" id="fit-dist" disabled>Match distance</button>
         <button class="btn small" id="gpx" disabled>Export GPX</button>
+        <button class="btn small" id="kml" disabled title="KML file to import into Google My Maps">Export for My Maps</button>
       </div>
     </section>
 
@@ -587,7 +588,7 @@ function removeWaypoint(i) {
 function afterChange(fit) {
   buildRouteGeometry();
   renderStats();
-  ui.fitDist.disabled = ui.gpx.disabled = !legs.length;
+  ui.fitDist.disabled = ui.gpx.disabled = ui.kml.disabled = !legs.length;
   save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]), pinned });
   if (fit) fitRoute(); else draw();
 }
@@ -901,27 +902,61 @@ function describeNode(nd) {
 }
 function updateHomeLabel() { ui.homeLabel.textContent = homeLabel; }
 
-// ---------------------------------------------------------------- GPX export
-async function exportGpx() {
-  const { origin, scale } = DATA;
-  const pts = [];
-  for (let k = 0; k < routePts.length; k += 2) {
-    const lon = origin[0] + routePts[k] / G.kx / scale, lat = origin[1] - routePts[k + 1] / G.ky / scale;
-    pts.push(`<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`);
-  }
-  const km = (routeCum[routeCum.length - 1] / 1000).toFixed(1);
-  const name = `Verdun loop ${km} km`;
-  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Verdun Run Loops" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name></metadata>\n<trk><name>${name}</name><type>running</type><trkseg>\n${pts.join("\n")}\n</trkseg></trk>\n</gpx>\n`;
-  const fname = `verdun-loop-${km}km.gpx`;
+// ---------------------------------------------------------------- GPX / KML export
+function routeLonLat() {
+  const { origin, scale } = DATA, out = [];
+  for (let k = 0; k < routePts.length; k += 2) out.push([origin[0] + routePts[k] / G.kx / scale, origin[1] - routePts[k + 1] / G.ky / scale]);
+  return out;
+}
+function routeKm() { return (routeCum[routeCum.length - 1] / 1000).toFixed(1); }
+function xmlEsc(t) { return String(t).replace(/[<>&"']/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" })[c]); }
+async function saveFile(fname, data, mime, label) {
   try {
     const dl = await window.claude?.use?.("downloads");
-    if (dl) { await dl.save({ filename: fname, data: gpx }); setStatus("GPX saved", null, null, 2500); return; }
-  } catch (e) { if (e && e.code === "declined") return; }
+    if (dl) { await dl.save({ filename: fname, data }); setStatus(label + " saved", null, null, 2500); return true; }
+  } catch (e) { if (e && e.code === "declined") return false; }
   try {
-    const url = URL.createObjectURL(new Blob([gpx], { type: "application/gpx+xml" }));
+    const url = URL.createObjectURL(new Blob([data], { type: mime }));
     const a = document.createElement("a"); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-  } catch { setStatus("This viewer can't save files"); }
+    return true;
+  } catch { setStatus("This viewer can't save files"); return false; }
+}
+async function exportGpx() {
+  const pts = routeLonLat().map(([lon, lat]) => `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`);
+  const km = routeKm(), name = `Verdun loop ${km} km`;
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Verdun Run Loops" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name></metadata>\n<trk><name>${name}</name><type>running</type><trkseg>\n${pts.join("\n")}\n</trkseg></trk>\n</gpx>\n`;
+  await saveFile(`verdun-loop-${km}km.gpx`, gpx, "application/gpx+xml", "GPX");
+}
+// KML for Google My Maps (Create map → Import). Keeps line colour/width, adds a start pin and km markers.
+async function exportKml() {
+  const ll = routeLonLat(), km = routeKm(), name = `Verdun loop ${km} km`;
+  const c = (p) => `${p[0].toFixed(6)},${p[1].toFixed(6)},0`;
+  const marks = [];
+  for (let m = 1000, k = 0; m < routeCum[routeCum.length - 1] - 200; m += 1000) {
+    while (k < routeCum.length - 2 && routeCum[k + 1] < m) k++;
+    const t = (m - routeCum[k]) / ((routeCum[k + 1] - routeCum[k]) || 1), a = ll[k], b = ll[k + 1] || a;
+    marks.push(`<Placemark><name>${m / 1000} km</name><styleUrl>#km</styleUrl><Point><coordinates>${c([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])}</coordinates></Point></Placemark>`);
+  }
+  const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<name>${xmlEsc(name)}</name>
+<Style id="route"><LineStyle><color>ff1d55f2</color><width>5</width></LineStyle></Style>
+<Style id="start"><IconStyle><Icon><href>https://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href></Icon></IconStyle></Style>
+<Style id="km"><IconStyle><scale>0.6</scale><Icon><href>https://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle></Style>
+<Placemark><name>${xmlEsc(name)}</name><description>Running loop, ${km} km</description><styleUrl>#route</styleUrl><LineString><tessellate>1</tessellate><coordinates>
+${ll.map(c).join("\n")}
+</coordinates></LineString></Placemark>
+<Placemark><name>Start / finish</name><description>${xmlEsc(homeLabel || "Start")}</description><styleUrl>#start</styleUrl><Point><coordinates>${c(ll[0])}</coordinates></Point></Placemark>
+<Folder><name>Kilometre markers</name>
+${marks.join("\n")}
+</Folder>
+</Document>
+</kml>
+`;
+  if (await saveFile(`verdun-loop-${km}km.kml`, kml, "application/vnd.google-earth.kml+xml", "KML"))
+    setStatus("KML saved — in My Maps: Import, then pick this file", "Open My Maps", () => window.open("https://www.google.com/maps/d/", "_blank", "noopener"), 8000);
 }
 
 // ---------------------------------------------------------------- status toast
@@ -942,7 +977,7 @@ function setDistLabel() {
 }
 function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
-    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
+    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), kml: $("kml"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit") });
   for (const v of PRESETS) {
     const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
@@ -962,6 +997,7 @@ function wire() {
   ui.fitDist.onclick = matchDistance;
   ui.autoFit.addEventListener("change", () => { save({ autoFit: ui.autoFit.checked }); if (ui.autoFit.checked) autoFit(); });
   ui.gpx.onclick = exportGpx;
+  ui.kml.onclick = exportKml;
   ui.moveHome.onclick = () => {
     pickHome = !pickHome; cv.classList.toggle("pick", pickHome);
     ui.moveHome.textContent = pickHome ? "Cancel" : "Move";

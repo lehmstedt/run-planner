@@ -5,7 +5,7 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 - Pick a distance and it builds a loop from home (default: 5e Avenue, Verdun, H4G 2Z5).
 - Routing favours cycle paths and park trails over car roads (the "Path preference" slider sets how strongly).
 - Drag the route line to pull it through a new point, drag a white dot to move it, tap a dot to remove it.
-- "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch.
+- "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch; "Export for My Maps" saves a KML file (styled route, start pin, km markers) to import into Google My Maps (Create a new map → Import).
 
 ## Files
 
