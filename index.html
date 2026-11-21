@@ -107,6 +107,19 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .home { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
 .home b { font-weight: 600; display: block; }
 .home span { color: var(--ink-2); }
+.save-row { display: flex; gap: 8px; }
+.save-row input { flex: 1; min-width: 0; font: 500 14px var(--f-body); padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--ground); color: var(--ink); }
+.save-row input::placeholder { color: var(--ink-2); }
+.saved { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.saved li { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 0; border-radius: 10px; background: var(--ground); }
+.saved li.active { outline: 2px solid var(--accent); }
+.saved .open { flex: 1; min-width: 0; text-align: left; background: none; border: 0; color: var(--ink); cursor: pointer; padding: 6px 10px; border-radius: 8px; font: inherit; }
+.saved .nm { display: block; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.saved .sub { display: block; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; margin-top: 1px; }
+.saved .del { flex: none; width: 32px; height: 32px; border-radius: 8px; border: 0; background: none; color: var(--ink-2); font-size: 18px; cursor: pointer; }
+.saved .del:hover { color: var(--route); background: var(--panel); }
+.saved .open:focus-visible, .saved .del:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.saved-note { font-size: 12px; color: var(--ink-2); margin: 0; }
 .foot { font-size: 11px; color: var(--ink-2); margin-top: auto; line-height: 1.5; }
 
 .status { position: absolute; left: 50%; top: calc(64px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: flex; gap: 10px; align-items: center; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
@@ -189,6 +202,16 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <button class="btn small" id="gpx" disabled>Export GPX</button>
         <button class="btn small" id="gmaps" disabled>Open in Google Maps</button>
       </div>
+    </section>
+
+    <section class="block" aria-labelledby="saved-label">
+      <div class="label" id="saved-label">Saved loops</div>
+      <form class="save-row" id="save-form">
+        <input type="text" id="save-name" maxlength="60" placeholder="Name this loop" aria-label="Name for this loop" autocomplete="off">
+        <button class="btn small" id="save-btn" type="submit" disabled>Save</button>
+      </form>
+      <ul class="saved" id="saved-list"></ul>
+      <p class="saved-note" id="saved-note">No saved loops yet.</p>
     </section>
 
     <section class="home">
@@ -592,7 +615,7 @@ function removeWaypoint(i) {
 function afterChange(fit) {
   buildRouteGeometry();
   renderStats();
-  ui.fitDist.disabled = ui.gpx.disabled = ui.gmaps.disabled = !legs.length;
+  ui.fitDist.disabled = ui.gpx.disabled = ui.gmaps.disabled = ui.saveBtn.disabled = !legs.length;
   save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]), pinned });
   if (fit) fitRoute(); else draw();
 }
@@ -956,6 +979,105 @@ async function openGoogleMaps() {
   catch { setStatus("Couldn't open Google Maps", "Try again", () => { location.href = url; }); }
 }
 
+// ---------------------------------------------------------------- saved loops
+// Signed in on claude.ai: each runner's loops live in their own private db subtree.
+// Elsewhere (opened as a plain file, signed out, no write access): this browser's storage.
+const LS_SAVED = LS + "-saved";
+let savedCloud = [], savedLocal = [], savedCol = null, activeSaved = null;
+const toLL = (x, y) => toLatLon(x, y).map((v) => +v.toFixed(6));
+function fromLL(lat, lon) { const { origin, scale } = DATA; return [(lon - origin[0]) * scale * G.kx, -(lat - origin[1]) * scale * G.ky]; }
+function readLocalSaved() { try { const v = JSON.parse(localStorage.getItem(LS_SAVED) || "[]"); return Array.isArray(v) ? v : []; } catch { return []; } }
+function writeLocalSaved() { try { localStorage.setItem(LS_SAVED, JSON.stringify(savedLocal)); return true; } catch { return false; } }
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+async function initSaved() {
+  savedLocal = readLocalSaved().map((it) => ({ ...it, src: "local" }));
+  renderSaved();
+  try {
+    const db = await window.claude?.use?.("db"), user = await window.claude?.use?.("user");
+    const uid = db && user ? await user.id() : null;
+    if (!uid) return;
+    savedCol = db.doc("data/users/" + uid + "/planner").collection("loops");
+    const slow = setTimeout(() => { if (!savedCloud.length) setSavedNote("Your saved loops can't be reached right now."); }, 10000);
+    savedCol.orderBy("createdAt", "desc").onSnapshot((snap) => {
+      if (!snap.metadata.fromCache) clearTimeout(slow);
+      savedCloud = snap.docs.map((d) => ({ ...d.data(), id: d.id, src: "cloud" }));
+      renderSaved();
+    }, () => { clearTimeout(slow); savedCol = null; renderSaved(); });
+  } catch { savedCol = null; }
+}
+function setSavedNote(t) { ui.savedNote.textContent = t; ui.savedNote.hidden = !t; }
+function renderSaved() {
+  const items = [...savedCloud, ...savedLocal].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  ui.savedList.replaceChildren();
+  for (const it of items) {
+    const li = document.createElement("li");
+    if (activeSaved === it.id) li.className = "active";
+    const open = document.createElement("button"); open.type = "button"; open.className = "open";
+    const nm = document.createElement("span"); nm.className = "nm"; nm.textContent = it.name || "Untitled loop";
+    const sub = document.createElement("span"); sub.className = "sub";
+    const date = it.createdAt ? new Date(it.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+    sub.textContent = [`${(+it.km || 0).toFixed(2)} km`, it.homeLabel, date, it.src === "local" ? "this device" : ""].filter(Boolean).join(" · ");
+    open.append(nm, sub); open.title = "Open this loop"; open.onclick = () => openSaved(it);
+    const del = document.createElement("button"); del.type = "button"; del.className = "del"; del.textContent = "×";
+    del.setAttribute("aria-label", `Delete ${it.name || "loop"}`); del.onclick = () => deleteSaved(it);
+    li.append(open, del); ui.savedList.appendChild(li);
+  }
+  setSavedNote(items.length ? "" : "No saved loops yet.");
+}
+async function saveCurrent(ev) {
+  ev.preventDefault();
+  if (!G || !legs.length) return;
+  const km = summarize(legs).len / 1000;
+  const name = ui.saveName.value.trim() || `${km.toFixed(1)} km loop`;
+  const it = { name, km: +km.toFixed(2), target: +ui.dist.value, pref: +ui.pref.value, homeLabel,
+    wps: waypoints.map((k) => toLL(G.nx[k], G.ny[k])), pinned: pinned.map(Boolean), createdAt: Date.now() };
+  ui.saveBtn.disabled = true;
+  let where = null;
+  if (savedCol) {
+    try { const id = newId(); await savedCol.doc(id).set(it); activeSaved = id; where = "cloud"; } catch {}
+  }
+  if (!where) {
+    const id = newId(); savedLocal.unshift({ ...it, id, src: "local" });
+    if (writeLocalSaved()) { activeSaved = id; where = "local"; } else savedLocal.shift();
+  }
+  ui.saveBtn.disabled = !legs.length;
+  if (!where) { setStatus("This viewer can't save loops", null, null, 3000); return; }
+  ui.saveName.value = "";
+  renderSaved();
+  setStatus(where === "cloud" ? `Saved “${name}”` : `Saved “${name}” on this device`, null, null, 2500);
+}
+async function openSaved(it) {
+  if (!G || !Array.isArray(it.wps) || it.wps.length < 2) return;
+  const wps = it.wps.map(([lat, lon]) => { const [x, y] = fromLL(lat, lon); return nearestNode(x, y); });
+  if (wps.some((n) => n < 0)) { setStatus("That loop is outside this map", null, null, 3000); return; }
+  const ls = routeLoop(wps, false);
+  if (!ls) { setStatus("That loop can't be routed on this map", null, null, 3000); return; }
+  pushUndo(); bumpRun(); tuning = false;
+  if (it.target) { ui.dist.value = it.target; setDistLabel(); }
+  if (it.pref != null && +ui.pref.value !== it.pref) { ui.pref.value = it.pref; setPref(it.pref / 100); }
+  home = wps[0]; homeLabel = it.homeLabel || "Custom start"; updateHomeLabel();
+  save({ dist: +ui.dist.value, pref: +ui.pref.value, home: [G.nx[home], G.ny[home]], homeLabel });
+  waypoints = wps; legs = ls;
+  pinned = wps.map((_, i) => i > 0 && !!(it.pinned && it.pinned[i]));
+  candidates = []; ui.another.disabled = true;
+  activeSaved = it.id; renderSaved();
+  afterChange(true);
+  setStatus(`Opened “${it.name || "loop"}”`, null, null, 2000);
+}
+async function deleteSaved(it) {
+  const { id, src, ...body } = it;
+  if (src === "cloud") {
+    try { await savedCol.doc(id).delete(); } catch { setStatus("Couldn't delete that loop", null, null, 3000); return; }
+  } else { savedLocal = savedLocal.filter((x) => x.id !== id); writeLocalSaved(); }
+  if (activeSaved === id) activeSaved = null;
+  renderSaved();
+  setStatus(`Deleted “${it.name || "loop"}”`, "Undo", async () => {
+    if (src === "cloud") { try { await savedCol.doc(id).set(body); } catch {} }
+    else { savedLocal.push(it); writeLocalSaved(); renderSaved(); }
+  }, 5000);
+}
+
 // ---------------------------------------------------------------- status toast
 let statusTimer = 0;
 function setStatus(text, actionLabel, action, ms) {
@@ -975,7 +1097,9 @@ function setDistLabel() {
 function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
-    pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit") });
+    pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit"),
+    saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note") });
+  $("save-form").addEventListener("submit", saveCurrent);
   for (const v of PRESETS) {
     const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
     b.onclick = () => { ui.dist.value = v; onDist(true); }; ui.presets.appendChild(b);
@@ -1030,6 +1154,7 @@ async function boot() {
     DATA = JSON.parse(new TextDecoder().decode(buf));
   } catch (e) { setStatus("The map file didn't load. Reload the page to try again."); return; }
   G = buildGraph(DATA);
+  initSaved();
   layers = buildLayers();
   const h = DATA.home;
   const hx = (h.lon - DATA.origin[0]) * DATA.scale * G.kx, hy = -(h.lat - DATA.origin[1]) * DATA.scale * G.ky;
