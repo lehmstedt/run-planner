@@ -9,14 +9,13 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 
 ## Deploy
 
-It's a static site (no build step), so any static host works. On Vercel:
+It's a static site (no build step), published with GitHub Pages by `.github/workflows/pages.yml`:
 
-1. vercel.com → Add New → Project → import this GitHub repo.
-2. Framework preset: **Other**. Leave the build command and output directory empty.
-3. Deploy. Each push to the production branch redeploys.
+1. One-time setup: repo **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. Every push to `main` redeploys (or run the workflow by hand from the Actions tab).
+3. The site is served at `https://<owner>.github.io/run-planner/`.
 
-Or from a terminal: `npx vercel` (preview) / `npx vercel --prod`.
-`vercel.json` caches `map-data.json` for a day; `.vercelignore` keeps `scripts/` out of the deployment.
+Only `index.html` and `map-data.json` are published; `scripts/` stays in the repo.
 
 ## Files
 
