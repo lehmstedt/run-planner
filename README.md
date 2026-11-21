@@ -8,6 +8,16 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 - "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch.
 - "Open in Google Maps" opens the loop as a walking itinerary (home → 9 stops spread along the loop → home). Google allows at most 9 stops per link and picks its own streets between them, so long loops may differ slightly from the planned one; use GPX for an exact track.
 
+## Deploy
+
+It's a static site (no build step), published with GitHub Pages by `.github/workflows/pages.yml`:
+
+1. One-time setup: repo **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. Every push to `main` redeploys (or run the workflow by hand from the Actions tab).
+3. The site is served at `https://<owner>.github.io/run-planner/`.
+
+Only `index.html` and `map-data.json` are published; `scripts/` stays in the repo.
+
 ## Files
 
 - `index.html` – the app (canvas map + A* routing in the browser).
