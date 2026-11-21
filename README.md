@@ -7,6 +7,17 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 - Drag the route line to pull it through a new point, drag a white dot to move it, tap a dot to remove it.
 - "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch.
 
+## Deploy
+
+It's a static site (no build step), so any static host works. On Vercel:
+
+1. vercel.com → Add New → Project → import this GitHub repo.
+2. Framework preset: **Other**. Leave the build command and output directory empty.
+3. Deploy. Each push to the production branch redeploys.
+
+Or from a terminal: `npx vercel` (preview) / `npx vercel --prod`.
+`vercel.json` caches `map-data.json` for a day; `.vercelignore` keeps `scripts/` out of the deployment.
+
 ## Files
 
 - `index.html` – the app (canvas map + A* routing in the browser).
