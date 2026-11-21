@@ -6,6 +6,7 @@ A running-route planner that runs entirely offline inside a Claude artifact.
 - Routing favours cycle paths and park trails over car roads (the "Path preference" slider sets how strongly).
 - Drag the route line to pull it through a new point, drag a white dot to move it, tap a dot to remove it.
 - "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch.
+- "Open in Google Maps" opens the loop as a walking itinerary (home → 9 stops spread along the loop → home). Google allows at most 9 stops per link and picks its own streets between them, so long loops may differ slightly from the planned one; use GPX for an exact track.
 
 ## Files
 

@@ -183,6 +183,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <button class="btn small" id="undo" disabled>Undo</button>
         <button class="btn small" id="fit-dist" disabled>Match distance</button>
         <button class="btn small" id="gpx" disabled>Export GPX</button>
+        <button class="btn small" id="gmaps" disabled>Open in Google Maps</button>
       </div>
     </section>
 
@@ -587,7 +588,7 @@ function removeWaypoint(i) {
 function afterChange(fit) {
   buildRouteGeometry();
   renderStats();
-  ui.fitDist.disabled = ui.gpx.disabled = !legs.length;
+  ui.fitDist.disabled = ui.gpx.disabled = ui.gmaps.disabled = !legs.length;
   save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]), pinned });
   if (fit) fitRoute(); else draw();
 }
@@ -902,11 +903,11 @@ function describeNode(nd) {
 function updateHomeLabel() { ui.homeLabel.textContent = homeLabel; }
 
 // ---------------------------------------------------------------- GPX export
+function toLatLon(x, y) { return [DATA.origin[1] - y / G.ky / DATA.scale, DATA.origin[0] + x / G.kx / DATA.scale]; }
 async function exportGpx() {
-  const { origin, scale } = DATA;
   const pts = [];
   for (let k = 0; k < routePts.length; k += 2) {
-    const lon = origin[0] + routePts[k] / G.kx / scale, lat = origin[1] - routePts[k + 1] / G.ky / scale;
+    const [lat, lon] = toLatLon(routePts[k], routePts[k + 1]);
     pts.push(`<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`);
   }
   const km = (routeCum[routeCum.length - 1] / 1000).toFixed(1);
@@ -922,6 +923,33 @@ async function exportGpx() {
     const a = document.createElement("a"); a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   } catch { setStatus("This viewer can't save files"); }
+}
+
+// ---------------------------------------------------------------- Google Maps export
+// Google Maps directions links take at most 9 stops between origin and destination, and Google
+// picks its own path between them, so the loop is pinned with stops spread evenly along it.
+const GMAPS_STOPS = 9;
+function googleMapsUrl() {
+  const total = routeCum[routeCum.length - 1], n = routeCum.length;
+  const fmt = (i) => toLatLon(routePts[2 * i], routePts[2 * i + 1]).map((v) => v.toFixed(6)).join(",");
+  const stops = [];
+  for (let s = 1, i = 0; s <= GMAPS_STOPS; s++) {
+    const d = total * s / (GMAPS_STOPS + 1);
+    while (i < n - 1 && routeCum[i] < d) i++;
+    if (stops[stops.length - 1] !== i) stops.push(i);
+  }
+  const p = new URLSearchParams({ api: "1", origin: fmt(0), destination: fmt(n - 1), travelmode: "walking" });
+  p.set("waypoints", stops.map(fmt).join("|"));
+  return "https://www.google.com/maps/dir/?" + p.toString();
+}
+async function openGoogleMaps() {
+  if (routePts.length < 4) return;
+  const url = googleMapsUrl();
+  let w = null;
+  try { w = window.open(url, "_blank"); if (w) w.opener = null; } catch {}
+  if (w) { setStatus("Opened in Google Maps: it may take slightly different streets between the stops", null, null, 5000); return; }
+  try { await navigator.clipboard.writeText(url); setStatus("Pop-up blocked: Google Maps link copied", null, null, 4000); }
+  catch { setStatus("Couldn't open Google Maps", "Try again", () => { location.href = url; }); }
 }
 
 // ---------------------------------------------------------------- status toast
@@ -942,7 +970,7 @@ function setDistLabel() {
 }
 function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
-    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
+    undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit") });
   for (const v of PRESETS) {
     const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
@@ -962,6 +990,7 @@ function wire() {
   ui.fitDist.onclick = matchDistance;
   ui.autoFit.addEventListener("change", () => { save({ autoFit: ui.autoFit.checked }); if (ui.autoFit.checked) autoFit(); });
   ui.gpx.onclick = exportGpx;
+  ui.gmaps.onclick = openGoogleMaps;
   ui.moveHome.onclick = () => {
     pickHome = !pickHome; cv.classList.toggle("pick", pickHome);
     ui.moveHome.textContent = pickHome ? "Cancel" : "Move";
