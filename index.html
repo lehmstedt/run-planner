@@ -109,6 +109,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .legend .k { display: flex; align-items: center; gap: 7px; }
 .legend .k i { width: 10px; height: 10px; border-radius: 2px; flex: none; }
 .legend .v { color: var(--ink-2); text-align: right; }
+.turns { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; border-top: 1px solid var(--line); padding-top: 8px; }
+.turns:empty { display: none; }
 
 .edit-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .help { font-size: 13px; color: var(--ink-2); line-height: 1.5; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
@@ -147,20 +149,59 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .mapkey span { display: flex; align-items: center; gap: 6px; }
 .mapkey i { width: 16px; height: 4px; border-radius: 2px; display: block; }
 
+.sheet-handle { display: none; }
 @media (max-width: 760px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
-  .rail { order: 2; border-right: 0; border-top: 1px solid var(--line); max-height: 48vh; padding-block: 14px 18px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); gap: 14px; }
+  /* Phones: the controls are a bottom sheet. Collapsed it holds distance and the loop buttons;
+     "More options" (tap or swipe up on the handle) opens the rest. */
+  body { overscroll-behavior: none; }
+  .app { height: 100vh; height: 100dvh; grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+  .rail {
+    order: 2; border-right: 0; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0; margin-top: -16px;
+    box-shadow: 0 -4px 18px rgb(20 30 34 / .12); max-height: 78vh; max-height: 78dvh;
+    padding-block: 0 max(14px, env(safe-area-inset-bottom, 0px)); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+    gap: 12px; overscroll-behavior: contain;
+  }
+  .rail.collapsed .more { display: none; }
+  .rail.collapsed { overflow: hidden; }
+  .sheet-handle {
+    display: flex; flex-direction: column; align-items: center; gap: 5px; position: sticky; top: 0; z-index: 1;
+    margin-inline: -16px; padding: 8px 0 4px; border: 0; background: var(--panel); color: var(--ink-2);
+    font: 600 11px var(--f-body); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; touch-action: none;
+  }
+  .sheet-handle i { width: 38px; height: 5px; border-radius: 3px; background: var(--line); }
+  .sheet-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
   header p, .help { display: none; }
   header h1 { font-size: 24px; }
-  .dist-val { font-size: 44px; }
+  .block { gap: 8px; }
+  .rail.collapsed #dist-label { display: none; }
+  .dist-row { justify-content: space-between; }
+  .dist-val { font-size: 40px; text-align: center; flex: 1; }
+  .step { width: 46px; height: 46px; font-size: 22px; }
+  .presets { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-inline: -16px; padding: 2px 16px; scroll-padding-inline: 16px; }
+  .presets::-webkit-scrollbar { display: none; }
+  .chip { flex: none; padding: 8px 13px; font-size: 13px; }
+  .btn { padding: 13px 12px; font-size: 15px; }
+  .btn.small { padding: 11px 12px; font-size: 14px; border-radius: 10px; }
+  .edit-row { display: grid; grid-template-columns: 1fr 1fr; }
+  .save-row input { font-size: 16px; padding: 10px 12px; }
+  .saved .del { width: 40px; height: 40px; }
+  .toggle input { width: 20px; height: 20px; margin-top: 0; flex: none; }
   .mapkey { display: none; }
+  .zoom { bottom: 28px; }
+  .zoom button { width: 44px; height: 44px; }
+  .distpill { padding: 6px 10px 7px; }
+  .distpill b { font-size: 22px; }
+  .status { white-space: normal; text-align: center; border-radius: 16px; line-height: 1.35; }
 }
+@media (max-width: 760px) and (max-height: 520px) { .rail { max-height: 92dvh; } .dist-val { font-size: 32px; } }
+button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
 <div class="app">
-  <aside class="rail" aria-label="Route controls">
-    <header>
+  <aside class="rail collapsed" id="rail" aria-label="Route controls">
+    <button class="sheet-handle" id="sheet-toggle" type="button" aria-expanded="false" aria-controls="rail"><i></i><span id="sheet-label">More options</span></button>
+    <header class="more">
       <h1>Verdun Run Loops</h1>
       <button class="btn small install" id="install" hidden>Install app</button>
       <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Montréal from Lachine to the Olympic Stadium, up to marathon distance.</p>
@@ -173,11 +214,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         <div class="dist-val" id="dist-val">8.0<small>km</small></div>
         <button class="step" id="dist-plus" aria-label="Longer by 0.5 km">+</button>
       </div>
-      <input type="range" id="dist" min="2" max="45" step="0.5" value="8" aria-label="Target distance in kilometres">
+      <input type="range" class="more" id="dist" min="2" max="45" step="0.5" value="8" aria-label="Target distance in kilometres">
       <div class="presets" id="presets"></div>
     </section>
 
-    <section class="block" aria-labelledby="pref-label">
+    <section class="block more" aria-labelledby="pref-label">
       <div class="label" id="pref-label">Path preference</div>
       <input type="range" id="pref" min="0" max="100" step="5" value="80" aria-label="How strongly to favour cycle paths">
       <div class="scale-ends"><span>Shortest way</span><span>Cycle paths first</span></div>
@@ -188,16 +229,17 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       <button class="btn" id="another" disabled>Try another</button>
     </div>
 
-    <section class="stats" aria-live="polite">
+    <section class="stats more" aria-live="polite">
       <div class="stats-top">
         <div><div class="label">This loop</div><div class="actual" id="actual">–</div></div>
         <div class="delta" id="delta"></div>
       </div>
       <div class="bar" id="bar"></div>
       <div class="legend" id="legend"></div>
+      <div class="turns" id="turns"></div>
     </section>
 
-    <section class="block" aria-labelledby="edit-label">
+    <section class="block more" aria-labelledby="edit-label">
       <div class="label" id="edit-label">Reroute</div>
       <ul class="help">
         <li>Drag the orange line to pull the route through a new point.</li>
@@ -214,7 +256,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       </div>
     </section>
 
-    <section class="block" aria-labelledby="saved-label">
+    <section class="block more" aria-labelledby="saved-label">
       <div class="label" id="saved-label">Saved loops</div>
       <form class="save-row" id="save-form">
         <input type="text" id="save-name" maxlength="60" placeholder="Name this loop" aria-label="Name for this loop" autocomplete="off">
@@ -224,12 +266,12 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
       <p class="saved-note" id="saved-note">No saved loops yet.</p>
     </section>
 
-    <section class="home">
+    <section class="home more">
       <div><span>Start and finish</span><b id="home-label">5e Avenue, H4G 2Z5</b></div>
       <button class="btn small" id="move-home">Move</button>
     </section>
 
-    <div class="foot">Map data © OpenStreetMap contributors (ODbL), via Overture Maps release 2026-11-18. Busy roads are avoided, not forbidden; check crossings on the ground.</div>
+    <div class="foot more">Map data © OpenStreetMap contributors (ODbL), via Overture Maps release 2026-11-18. Busy roads are avoided, not forbidden; check crossings on the ground.</div>
   </aside>
 
   <main class="mapwrap">
@@ -315,6 +357,17 @@ function buildGraph({ meta, a }) {
     let x = qx[ea[i]], y = qy[ea[i]];
     for (let k = goff[i]; k < goff[i + 1]; k++) { x += gD[2 * k]; y += gD[2 * k + 1]; gpts[2 * k] = x * kx; gpts[2 * k + 1] = -y * ky; }
   }
+  // unit direction leaving each end of an edge (first geometry point at least 6 m away), for turn costs
+  const dA = new Float32Array(2 * m), dB = new Float32Array(2 * m);
+  const ptOf = (e, q) => q < 0 ? [nx[ea[e]], ny[ea[e]]] : q >= goff[e + 1] - goff[e] ? [nx[eb[e]], ny[eb[e]]] : [gpts[2 * (goff[e] + q)], gpts[2 * (goff[e] + q) + 1]];
+  for (let e = 0; e < m; e++) {
+    const cnt = goff[e + 1] - goff[e];
+    for (const [D, q0, dq, ox, oy] of [[dA, 0, 1, nx[ea[e]], ny[ea[e]]], [dB, cnt - 1, -1, nx[eb[e]], ny[eb[e]]]]) {
+      let q = q0, x = 0, y = 0;
+      for (;; q += dq) { [x, y] = ptOf(e, q); if (q < 0 || q >= cnt || Math.hypot(x - ox, y - oy) >= 6) break; }
+      const L = Math.hypot(x - ox, y - oy) || 1; D[2 * e] = (x - ox) / L; D[2 * e + 1] = (y - oy) / L;
+    }
+  }
   // spatial grid for nearest node
   const CELL = 120, gy0 = -30000;
   const grid = new Map();
@@ -332,7 +385,7 @@ function buildGraph({ meta, a }) {
     }
     return { poly, ring, pts, count: poly.length - 1 };
   };
-  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, goff, gpts, grid, CELL, gy0, names: meta.names,
+  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, dA, dB, goff, gpts, grid, CELL, gy0, names: meta.names,
     water: polys(a.waterPoly, a.waterRing, a.waterD), parks: polys(a.parkPoly, a.parkRing, a.parkD), kx, ky };
 }
 
@@ -381,8 +434,36 @@ class Heap { // binary min-heap on typed arrays; lastKey = key of the last pop
 // Leg penalties while building a loop (discourages reusing streets): per-edge weight, valid when penS[e] === the loop's id.
 let penW = null, penS = null, penId = 0;
 function newPenalty() { if (!penW) { penW = new Float32Array(G.m); penS = new Int32Array(G.m); } return ++penId; }
+// Turn costs (in metres of extra running), charged only at junctions so curvy trails aren't penalised.
+// A runner loses rhythm at every corner and hates doubling back: gentle bends are free, a right angle
+// costs TURN_M, a hairpin about twice that plus REVERSE_M.
+const TURN_M = 40, REVERSE_M = 350, FREE_COS = 0.9, REVERSE_COS = -0.8;
+// cosine of the change of direction when arriving at u along edge a and leaving along edge b
+function turnCos(u, a, b, w = u) { // w: node where a arrives, if a short connector lies between a and b
+  const { ea, dA, dB } = G;
+  const ia = 2 * a, ib = 2 * b;
+  const ax = ea[a] === w ? dA[ia] : dB[ia], ay = ea[a] === w ? dA[ia + 1] : dB[ia + 1];
+  const bx = ea[b] === u ? dA[ib] : dB[ib], by = ea[b] === u ? dA[ib + 1] : dB[ib + 1];
+  return a === b ? -1 : -(ax * bx + ay * by);
+}
+// Doubling back through a short connector (crossing to the other sidewalk, a short jog): two right
+// angles that add up to a hairpin. SHORT_M: longest connector that still counts.
+const SHORT_M = 35;
+function backViaShort(u, inE, e, s, startEdge) {
+  if (G.el[inE] > SHORT_M) return false;
+  const w = G.ea[inE] === u ? G.eb[inE] : G.ea[inE], pe = w === s ? startEdge : cameFrom[w];
+  return pe >= 0 && pe !== inE && turnCos(u, pe, e, w) < REVERSE_COS;
+}
+function turnCost(u, a, b) {
+  if (a < 0 || G.off[u + 1] - G.off[u] < 3) return 0;
+  const c = turnCos(u, a, b);
+  if (c > FREE_COS) return 0;
+  return TURN_M * (1 - c) + (c < REVERSE_COS ? REVERSE_M : 0);
+}
+const lastEdge = (l) => l && l.edges.length ? l.edges[l.edges.length - 1] : -1;
 const routeHeap = new Heap();
-function route(s, t, penalty) {
+// startEdge: the edge the runner arrives on at s (previous leg), so the leg doesn't start by turning back.
+function route(s, t, penalty, startEdge = -1) {
   if (s === t) return { nodes: [s], edges: [], len: 0 };
   const { nx, ny, ea, eb, ec, el, off, adj } = G;
   if (!gScore) { gScore = new Float64Array(G.n); cameFrom = new Int32Array(G.n); closedStamp = new Int32Array(G.n); openStamp = new Int32Array(G.n); }
@@ -398,12 +479,13 @@ function route(s, t, penalty) {
     if (closedStamp[u] === stamp) continue;
     closedStamp[u] = stamp;
     if (u === t) break;
-    const gu = gScore[u];
+    const gu = gScore[u], inE = u === s ? startEdge : cameFrom[u], turns = inE >= 0 && off[u + 1] - off[u] >= 3;
     for (let p = off[u]; p < off[u + 1]; p++) {
       const e = adj[p], v = ea[e] === u ? eb[e] : ea[e];
       if (closedStamp[v] === stamp) continue;
       let w = el[e] * costF[ec[e]];
       if (penalty && penS[e] === penalty) w *= penW[e];
+      if (turns) { w += turnCost(u, inE, e); if (backViaShort(u, inE, e, s, startEdge)) w += REVERSE_M; }
       const g = gu + w + 0.5;
       if (openStamp[v] !== stamp || g < gScore[v]) { gScore[v] = g; openStamp[v] = stamp; cameFrom[v] = e; heap.push(g + h(v), v); }
     }
@@ -424,7 +506,7 @@ function legInfo(r) {
 function routeLoop(wps, pen) {
   const penalty = pen ? newPenalty() : 0, out = [];
   for (let i = 0; i < wps.length; i++) {
-    const r = route(wps[i], wps[(i + 1) % wps.length], penalty);
+    const r = route(wps[i], wps[(i + 1) % wps.length], penalty, lastEdge(out[i - 1]));
     if (!r) return null;
     out.push(legInfo(r));
     if (penalty) for (const e of r.edges) { if (penS[e] === penalty) penW[e] *= 4; else { penS[e] = penalty; penW[e] = 4; } }
@@ -435,7 +517,25 @@ function summarize(ls) {
   const catLen = new Float64Array(9); let len = 0; const seen = new Map(); let overlap = 0;
   for (const l of ls) { len += l.len; for (let c = 0; c < 9; c++) catLen[c] += l.catLen[c];
     for (const e of l.edges) { if (seen.has(e)) overlap += G.el[e]; seen.set(e, 1); } }
-  return { len, catLen, overlap };
+  return { len, catLen, overlap, ...countTurns(ls) };
+}
+// Corners (direction changes over ~50°, at junctions) and turn-backs (hairpins) along the loop,
+// including where one leg hands over to the next. Short crossing jogs count once.
+function countTurns(ls) {
+  let turns = 0, backs = 0, prev = -1, prev2 = -1, prevNode = -1, lastBack = -9;
+  for (let li = 0; li < ls.length; li++) {
+    const l = ls[li];
+    for (let i = 0; i < l.edges.length; i++) {
+      const e = l.edges[i], u = l.nodes[i];
+      if (prev >= 0 && G.off[u + 1] - G.off[u] >= 3) {
+        const c = turnCos(u, prev, e);
+        const viaShort = prev2 >= 0 && G.el[prev] <= SHORT_M && turnCos(u, prev2, e, prevNode) < REVERSE_COS;
+        if (c < REVERSE_COS || viaShort) { if (lastBack < 0) backs++; lastBack = 1; } else { lastBack = -9; if (c < 0.64) turns++; }
+      } else lastBack = -9;
+      prev2 = prev; prevNode = u; prev = e;
+    }
+  }
+  return { turns, backs };
 }
 async function makeCandidate(theta, D, nVia) {
   const hx = G.nx[home], hy = G.ny[home];
@@ -462,7 +562,8 @@ async function makeCandidate(theta, D, nVia) {
   if (!best) return null;
   const busy = (best.catLen[2] + best.catLen[5] + best.catLen[6] + best.catLen[7]) / best.len;
   const path = (best.catLen[0] + best.catLen[1]) / best.len;
-  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5;
+  const perKm = 1000 / best.len;
+  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5 + best.turns * perKm * 0.06 + best.backs * 0.5;
   return best;
 }
 async function generate() {
@@ -554,10 +655,13 @@ async function tuneDistance(includePinned) {
         const cands = nodesWithin(cur, R).filter((c) => c !== prev && c !== next)
           .map((c) => ({ c, est: Math.abs(L - oldLen + (straight(prev, c) + straight(c, next)) * ratio - D) }))
           .sort((a, b) => a.est - b.est).slice(0, 10);
+        const inPrev = i >= 2 ? lastEdge(legs[i - 2]) : -1, outNext = (i + 1) % n ? legs[(i + 1) % n].edges[0] : undefined;
         for (const { c } of cands) {
-          const a = route(prev, c), b = route(c, next);
+          const a = route(prev, c, 0, inPrev), b = route(c, next, 0, lastEdge(a));
           if (!a || !b) continue;
-          const e = Math.abs(L - oldLen + a.len + b.len - D);
+          // a point that makes the runner turn back at the next point is a last resort
+          const backAtNext = outNext != null && b.edges.length && turnCos(next, lastEdge(b), outNext) < REVERSE_COS;
+          const e = Math.abs(L - oldLen + a.len + b.len - D) + (backAtNext ? 400 : 0);
           if (!best || e < best.e) best = { i, c, a, b, e };
         }
         await maybeYield();
@@ -634,10 +738,19 @@ function undo() {
 function rerouteAround(i) {
   // recompute legs touching waypoint i
   const n = waypoints.length;
-  for (const li of [(i - 1 + n) % n, i]) {
-    const r = route(waypoints[li], waypoints[(li + 1) % n]);
-    if (r) legs[li] = legInfo(r);
-  }
+  for (const li of [(i - 1 + n) % n, i]) routeLeg(li);
+  fixTurnBack((i + 1) % n);
+}
+// (Re)route leg li, entering it the way the previous leg arrives.
+function routeLeg(li) {
+  const n = waypoints.length;
+  const r = route(waypoints[li], waypoints[(li + 1) % n], 0, li > 0 ? lastEdge(legs[li - 1]) : -1);
+  if (r) legs[li] = legInfo(r);
+}
+// If leg li now starts by doubling back on the leg before it, reroute it.
+function fixTurnBack(li) {
+  const l = legs[li], p = legs[li - 1];
+  if (li > 0 && l && p && l.edges.length && p.edges.length && turnCos(waypoints[li], lastEdge(p), l.edges[0]) < REVERSE_COS) routeLeg(li);
 }
 function insertWaypoint(legIdx, node) {
   bumpRun();
@@ -652,7 +765,7 @@ function removeWaypoint(i) {
   bumpRun();
   waypoints.splice(i, 1); legs.splice(i, 1); pinned.splice(i, 1);
   const n = waypoints.length, li = (i - 1 + n) % n;
-  const r = route(waypoints[li], waypoints[(li + 1) % n]); if (r) legs[li] = legInfo(r);
+  routeLeg(li); fixTurnBack((li + 1) % n);
   afterChange(false);
   setStatus("Point removed", "Undo", undo, 4000);
   autoFit();
@@ -701,6 +814,7 @@ function renderStats() {
   ui.pillKm.textContent = (s.len / 1000).toFixed(2) + " km";
   ui.pillDelta.textContent = ok ? `✓ ${(D / 1000).toFixed(1)} km` : `${dtxt} vs ${(D / 1000).toFixed(1)}`;
   ui.pill.dataset.state = ok ? "ok" : diff > 0 ? "over" : "under";
+  ui.turns.textContent = legs.length ? `${s.turns} corner${s.turns === 1 ? "" : "s"} · ${s.backs ? s.backs + " turn-back" + (s.backs === 1 ? "" : "s") : "no turn-backs"}` : "";
   ui.bar.innerHTML = ""; ui.legend.innerHTML = "";
   for (const g of GROUPS) {
     const v = g.cats.reduce((a, c) => a + s.catLen[c], 0), pct = s.len ? 100 * v / s.len : 0;
@@ -716,6 +830,7 @@ let W = 0, H = 0, DPR = 1, layers = null, colors = {}, fonts = {};
 function resize() {
   const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
   if (dpr !== DPR) { DPR = dpr; clearTiles(); }
+  if (H && view.s) { view.x += (r.width - W) / (2 * view.s); view.y += (r.height - H) / (2 * view.s); }
   W = r.width; H = r.height; cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); draw();
 }
 function readColors() {
@@ -1030,15 +1145,18 @@ function zoomAt(f, sx, sy) {
 
 // ---------------------------------------------------------------- pointer interaction
 let drag = null, pointers = new Map(), pinch = null, pickHome = false;
-function hitWaypoint(sx, sy) {
+// fingers are less precise than a mouse: bigger hit areas on touch
+function hitWaypoint(sx, sy, touch) {
+  const tol = touch ? 24 : 16;
+  let best = -1, bd = tol;
   for (let i = waypoints.length - 1; i >= 1; i--) {
-    const [x, y] = toScreen(G.nx[waypoints[i]], G.ny[waypoints[i]]);
-    if (Math.hypot(x - sx, y - sy) < 16) return i;
+    const [x, y] = toScreen(G.nx[waypoints[i]], G.ny[waypoints[i]]), d = Math.hypot(x - sx, y - sy);
+    if (d < bd) { bd = d; best = i; }
   }
-  return -1;
+  return best;
 }
-function hitRoute(sx, sy) {
-  const [wx, wy] = toWorld(sx, sy), tol = 12 / view.s;
+function hitRoute(sx, sy, touch) {
+  const [wx, wy] = toWorld(sx, sy), tol = (touch ? 18 : 12) / view.s;
   let best = -1, bd = tol;
   for (let i = 0; i < routePts.length / 2 - 1; i++) {
     const ax = routePts[2 * i], ay = routePts[2 * i + 1], bx = routePts[2 * i + 2], by = routePts[2 * i + 3];
@@ -1065,10 +1183,12 @@ cv.addEventListener("pointerdown", (ev) => {
     pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), s: view.s }; drag = null; return;
   }
   if (!G) return;
+  setSheet(false); // phones: touching the map folds the controls away
   if (pickHome) { drag = { type: "tap-home", sx, sy, moved: false, vx: view.x, vy: view.y }; return; }
-  const wp = hitWaypoint(sx, sy);
+  const touch = ev.pointerType !== "mouse";
+  const wp = hitWaypoint(sx, sy, touch);
   if (wp > 0) { drag = { type: "wp", wp, sx, sy, moved: false, before: snapshot() }; return; }
-  const leg = routePts.length ? hitRoute(sx, sy) : -1;
+  const leg = routePts.length ? hitRoute(sx, sy, touch) : -1;
   if (leg >= 0) { drag = { type: "newwp", leg, sx, sy, moved: false, before: snapshot() }; return; }
   drag = { type: "pan", sx, sy, vx: view.x, vy: view.y, moved: false };
   cv.classList.add("dragging");
@@ -1087,7 +1207,7 @@ cv.addEventListener("pointermove", (ev) => {
     cv.classList.toggle("on-point", onP); cv.classList.toggle("on-route", !!onR);
     return;
   }
-  const moved = Math.hypot(sx - drag.sx, sy - drag.sy) > 5;
+  const moved = Math.hypot(sx - drag.sx, sy - drag.sy) > (ev.pointerType === "mouse" ? 5 : 9);
   if (!drag.moved && !moved) return;
   drag.moved = true;
   if (drag.type === "pan" || drag.type === "tap-home") {
@@ -1345,7 +1465,7 @@ function setDistLabel() {
   for (const b of ui.presets.children) b.setAttribute("aria-pressed", String(+b.dataset.v === v));
 }
 function wire() {
-  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"),
+  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), kml: $("kml"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit"),
     saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note") });
@@ -1373,17 +1493,40 @@ function wire() {
   ui.moveHome.onclick = () => {
     pickHome = !pickHome; cv.classList.toggle("pick", pickHome);
     ui.moveHome.textContent = pickHome ? "Cancel" : "Move";
-    if (pickHome) setStatus("Tap the map where your runs start"); else clearStatus();
+    if (pickHome) { setSheet(false); setStatus("Tap the map where your runs start", "Cancel", () => ui.moveHome.onclick()); } else clearStatus();
   };
   $("zin").onclick = () => zoomAt(1.6, W / 2, H / 2);
   $("zout").onclick = () => zoomAt(1 / 1.6, W / 2, H / 2);
   $("zfit").onclick = fitRoute;
-  window.addEventListener("resize", resize);
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => resize()).observe(cv); else window.addEventListener("resize", resize);
+  wireSheet();
   const mq = matchMedia("(prefers-color-scheme: dark)");
   const recolor = () => { readColors(); clearTiles(); draw(); };
   document.fonts?.addEventListener?.("loadingdone", () => { fontEpoch++; draw(); });
   mq.addEventListener?.("change", recolor);
   new MutationObserver(recolor).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+}
+
+// ---------------------------------------------------------------- phone bottom sheet
+const phone = matchMedia("(max-width: 760px)");
+function setSheet(open) {
+  const rail = $("rail");
+  if (!phone.matches || rail.classList.contains("collapsed") === !open) return;
+  rail.classList.toggle("collapsed", !open);
+  $("sheet-toggle").setAttribute("aria-expanded", String(open));
+  $("sheet-label").textContent = open ? "Show map" : "More options";
+  if (!open) rail.scrollTop = 0;
+}
+function wireSheet() {
+  const h = $("sheet-toggle"), rail = $("rail");
+  let y0 = null, swiped = false;
+  h.addEventListener("pointerdown", (e) => { y0 = e.clientY; swiped = false; });
+  h.addEventListener("pointerup", (e) => {
+    if (y0 == null) return; const dy = e.clientY - y0; y0 = null;
+    if (Math.abs(dy) > 24) { swiped = true; setSheet(dy < 0); }
+  });
+  h.addEventListener("pointercancel", () => { y0 = null; });
+  h.addEventListener("click", () => { if (swiped) { swiped = false; return; } setSheet(rail.classList.contains("collapsed")); });
 }
 
 // ---------------------------------------------------------------- install / offline

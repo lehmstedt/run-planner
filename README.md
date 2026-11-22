@@ -4,6 +4,8 @@ A running-route planner that runs entirely offline, in a Claude artifact or as a
 
 - Pick a distance and it builds a loop from home (default: 5e Avenue, Verdun, H4G 2Z5).
 - Routing favours cycle paths and park trails over car roads (the "Path preference" slider sets how strongly).
+- Routes keep a steady line: every corner costs a little, and turning back (a hairpin, or crossing to the other sidewalk to come back the way you came) costs a lot, also where one leg hands over to the next. The loop summary counts corners and turn-backs.
+- On phones the controls are a bottom sheet: distance and the loop buttons stay visible; tap or swipe up "More options" for the rest, touch the map to fold it away.
 - Drag the route line to pull it through a new point, drag a white dot to move it, tap a dot to remove it.
 - "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch; "Export for My Maps" saves a KML file (styled route, start pin, km markers) to import into Google My Maps (Create a new map → Import).
 - "Open in Google Maps" opens the loop as a walking itinerary (home → 9 stops spread along the loop → home). Google allows at most 9 stops per link and picks its own streets between them, so long loops may differ slightly from the planned one; use GPX for an exact track.
