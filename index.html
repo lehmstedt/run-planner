@@ -5,7 +5,13 @@
 <title>Verdun Run Loops</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" id="font-css" media="print" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#e9edeb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161b1d" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <style>
 /* Layout: full-bleed offline street map with a control rail (left on desktop, bottom sheet on phones). */
 :root {
@@ -67,6 +73,8 @@ canvas#map.on-route { cursor: copy; }
 canvas#map.on-point { cursor: move; }
 canvas#map.pick { cursor: crosshair; }
 
+header { position: relative; }
+.install { position: absolute; top: 0; right: 0; }
 header h1 { font-family: var(--f-display); font-weight: 700; font-size: 30px; letter-spacing: .01em; margin: 0; line-height: 1; text-wrap: balance; }
 header p { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.45; }
 .label { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
@@ -154,6 +162,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   <aside class="rail" aria-label="Route controls">
     <header>
       <h1>Verdun Run Loops</h1>
+      <button class="btn small install" id="install" hidden>Install app</button>
       <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Montréal from Lachine to the Olympic Stadium, up to marathon distance.</p>
     </header>
 
@@ -273,41 +282,58 @@ function store() { try { return JSON.parse(localStorage.getItem(LS) || "{}"); } 
 function save(patch) { try { localStorage.setItem(LS, JSON.stringify(Object.assign(store(), patch))); } catch {} }
 
 // ---------------------------------------------------------------- graph
-function buildGraph(d) {
-  const n = d.nodes.length / 2, m = d.edges.length / 5;
-  const kx = Math.cos(45.46 * Math.PI / 180) * 111320 / d.scale, ky = 110540 / d.scale;
-  const nx = new Float32Array(n), ny = new Float32Array(n);
-  for (let i = 0; i < n; i++) { nx[i] = d.nodes[2 * i] * kx; ny[i] = -d.nodes[2 * i + 1] * ky; }
-  const side = new Uint8Array(m), ea = new Int32Array(m), eb = new Int32Array(m), ec = new Uint8Array(m), en = new Int32Array(m), el = new Float32Array(m);
+// map-data.bin (made by scripts/pack_map.py): "RPL1", meta JSON, then typed arrays read in place.
+function parseMap(buf) {
+  if (String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== "RPL1") throw new Error("not a map file");
+  const ml = new DataView(buf.buffer, buf.byteOffset).getUint32(4, true);
+  const meta = JSON.parse(new TextDecoder().decode(buf.subarray(8, 8 + ml)));
+  const T = { int32: Int32Array, uint32: Uint32Array, int16: Int16Array, uint16: Uint16Array, uint8: Uint8Array, float32: Float32Array };
+  const a = {}; let o = 8 + ml;
+  for (const [name, type, len] of meta.arrays) {
+    const C = T[type]; a[name] = new C(buf.buffer, buf.byteOffset + o, len);
+    o += len * C.BYTES_PER_ELEMENT; o += -o & 3;
+  }
+  return { meta, a };
+}
+function buildGraph({ meta, a }) {
+  const n = meta.n, m = meta.m, kx = meta.kx, ky = meta.ky;
+  const qx = new Int32Array(n), qy = new Int32Array(n), nx = new Float32Array(n), ny = new Float32Array(n);
+  for (let i = 0, x = 0, y = 0; i < n; i++) { x += a.nodeD[2 * i]; y += a.nodeD[2 * i + 1]; qx[i] = x; qy[i] = y; nx[i] = x * kx; ny[i] = -y * ky; }
+  const side = new Uint8Array(m), ea = new Int32Array(m), eb = new Int32Array(m), ec = new Uint8Array(m), en = a.en, el = new Float32Array(m);
   const deg = new Int32Array(n + 1);
-  for (let i = 0; i < m; i++) {
-    ea[i] = d.edges[5 * i]; eb[i] = d.edges[5 * i + 1]; ec[i] = d.edges[5 * i + 2] % 10; side[i] = d.edges[5 * i + 2] >= 10; en[i] = d.edges[5 * i + 3]; el[i] = d.edges[5 * i + 4];
+  for (let i = 0, p = 0; i < m; i++) {
+    p += a.eaD[i]; ea[i] = p; eb[i] = p + a.ebD[i];
+    const c = a.ecode[i]; ec[i] = c % 10; side[i] = c >= 10 ? 1 : 0; el[i] = a.elDm[i] / 10;
     deg[ea[i] + 1]++; if (eb[i] !== ea[i]) deg[eb[i] + 1]++;
   }
   for (let i = 0; i < n; i++) deg[i + 1] += deg[i];
   const adj = new Int32Array(deg[n]), fill = deg.slice(0, n);
   for (let i = 0; i < m; i++) { adj[fill[ea[i]]++] = i; if (eb[i] !== ea[i]) adj[fill[eb[i]]++] = i; }
-  // edge geometry in metres (inner points)
-  const geom = d.geom.map((flat, i) => {
-    const pts = new Float32Array(flat.length);
-    let x = d.nodes[2 * ea[i]], y = d.nodes[2 * ea[i] + 1];
-    for (let k = 0; k < flat.length; k += 2) { x += flat[k]; y += flat[k + 1]; pts[k] = x * kx; pts[k + 1] = -y * ky; }
-    return pts;
-  });
+  // edge geometry in metres (inner points of edge e: goff[e] .. goff[e+1]-1)
+  const goff = a.goff, gD = a.gD, gpts = new Float32Array(2 * goff[m]);
+  for (let i = 0; i < m; i++) {
+    let x = qx[ea[i]], y = qy[ea[i]];
+    for (let k = goff[i]; k < goff[i + 1]; k++) { x += gD[2 * k]; y += gD[2 * k + 1]; gpts[2 * k] = x * kx; gpts[2 * k + 1] = -y * ky; }
+  }
   // spatial grid for nearest node
   const CELL = 120, gy0 = -30000;
   const grid = new Map();
   for (let i = 0; i < n; i++) {
     if (deg[i + 1] === deg[i]) continue;
     const key = Math.floor(nx[i] / CELL) * 100000 + Math.floor((ny[i] - gy0) / CELL);
-    let a = grid.get(key); if (!a) grid.set(key, a = []); a.push(i);
+    let c = grid.get(key); if (!c) grid.set(key, c = []); c.push(i);
   }
-  const polys = (list) => list.map((rings) => rings.map((flat) => {
-    const pts = new Float32Array(flat.length); let x = 0, y = 0;
-    for (let k = 0; k < flat.length; k += 2) { x += flat[k]; y += flat[k + 1]; pts[k] = x * kx; pts[k + 1] = -y * ky; }
-    return pts;
-  }));
-  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, geom, grid, CELL, gy0, names: d.names, water: polys(d.water), parks: polys(d.parks), kx, ky };
+  // polygons: poly p has rings poly[p]..poly[p+1]-1, ring r has points ring[r]..ring[r+1]-1
+  const polys = (poly, ring, d) => {
+    const pts = new Float32Array(d.length);
+    for (let r = 0; r < ring.length - 1; r++) {
+      let x = 0, y = 0;
+      for (let k = ring[r]; k < ring[r + 1]; k++) { x += d[2 * k]; y += d[2 * k + 1]; pts[2 * k] = x * kx; pts[2 * k + 1] = -y * ky; }
+    }
+    return { poly, ring, pts, count: poly.length - 1 };
+  };
+  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, goff, gpts, grid, CELL, gy0, names: meta.names,
+    water: polys(a.waterPoly, a.waterRing, a.waterD), parks: polys(a.parkPoly, a.parkRing, a.parkD), kx, ky };
 }
 
 function nearestNode(x, y, filter) {
@@ -336,15 +362,26 @@ const friendly = (k) => { if (!junction(k)) return false; for (let p = G.off[k];
 let costF = new Float32Array(9);
 function setPref(p) { for (let c = 0; c < 9; c++) costF[c] = 1 + p * (FULL_COST[c] - 1); }
 let gScore, cameFrom, closedStamp, openStamp, stamp = 0;
-class Heap {
-  constructor() { this.k = []; this.v = []; }
-  push(key, val) { const k = this.k, v = this.v; let i = k.length; k.push(key); v.push(val);
-    while (i > 0) { const p = (i - 1) >> 1; if (k[p] <= key) break; k[i] = k[p]; v[i] = v[p]; i = p; } k[i] = key; v[i] = val; }
-  pop() { const k = this.k, v = this.v, top = v[0], lk = k.pop(), lv = v.pop(); const n = k.length;
+class Heap { // binary min-heap on typed arrays; lastKey = key of the last pop
+  constructor() { this.k = new Float64Array(4096); this.v = new Int32Array(4096); this.n = 0; this.lastKey = 0; }
+  clear() { this.n = 0; }
+  push(key, val) {
+    if (this.n === this.k.length) { const k = new Float64Array(this.n * 2), v = new Int32Array(this.n * 2); k.set(this.k); v.set(this.v); this.k = k; this.v = v; }
+    const k = this.k, v = this.v; let i = this.n++;
+    while (i > 0) { const p = (i - 1) >> 1; if (k[p] <= key) break; k[i] = k[p]; v[i] = v[p]; i = p; } k[i] = key; v[i] = val;
+  }
+  pop() {
+    const k = this.k, v = this.v, top = v[0]; this.lastKey = k[0];
+    const n = --this.n, lk = k[n], lv = v[n];
     if (n) { let i = 0; while (true) { let c = 2 * i + 1; if (c >= n) break; if (c + 1 < n && k[c + 1] < k[c]) c++; if (k[c] >= lk) break; k[i] = k[c]; v[i] = v[c]; i = c; } k[i] = lk; v[i] = lv; }
-    return top; }
-  get size() { return this.v.length; }
+    return top;
+  }
+  get size() { return this.n; }
 }
+// Leg penalties while building a loop (discourages reusing streets): per-edge weight, valid when penS[e] === the loop's id.
+let penW = null, penS = null, penId = 0;
+function newPenalty() { if (!penW) { penW = new Float32Array(G.m); penS = new Int32Array(G.m); } return ++penId; }
+const routeHeap = new Heap();
 function route(s, t, penalty) {
   if (s === t) return { nodes: [s], edges: [], len: 0 };
   const { nx, ny, ea, eb, ec, el, off, adj } = G;
@@ -354,7 +391,7 @@ function route(s, t, penalty) {
   minF = Math.min(1, minF * 1.35); // mildly inadmissible: much faster on long legs, routes stay near-optimal
   const tx = nx[t], ty = ny[t];
   const h = (k) => Math.hypot(nx[k] - tx, ny[k] - ty) * minF;
-  const heap = new Heap();
+  const heap = routeHeap; heap.clear();
   gScore[s] = 0; openStamp[s] = stamp; cameFrom[s] = -1; heap.push(h(s), s);
   while (heap.size) {
     const u = heap.pop();
@@ -366,7 +403,7 @@ function route(s, t, penalty) {
       const e = adj[p], v = ea[e] === u ? eb[e] : ea[e];
       if (closedStamp[v] === stamp) continue;
       let w = el[e] * costF[ec[e]];
-      if (penalty) { const pm = penalty.get(e); if (pm) w *= pm; }
+      if (penalty && penS[e] === penalty) w *= penW[e];
       const g = gu + w + 0.5;
       if (openStamp[v] !== stamp || g < gScore[v]) { gScore[v] = g; openStamp[v] = stamp; cameFrom[v] = e; heap.push(g + h(v), v); }
     }
@@ -385,12 +422,12 @@ function legInfo(r) {
 
 // ---------------------------------------------------------------- loop generation
 function routeLoop(wps, pen) {
-  const penalty = pen ? new Map() : null, out = [];
+  const penalty = pen ? newPenalty() : 0, out = [];
   for (let i = 0; i < wps.length; i++) {
     const r = route(wps[i], wps[(i + 1) % wps.length], penalty);
     if (!r) return null;
     out.push(legInfo(r));
-    if (penalty) for (const e of r.edges) penalty.set(e, (penalty.get(e) || 1) * 4);
+    if (penalty) for (const e of r.edges) { if (penS[e] === penalty) penW[e] *= 4; else { penS[e] = penalty; penW[e] = 4; } }
   }
   return out;
 }
@@ -400,7 +437,7 @@ function summarize(ls) {
     for (const e of l.edges) { if (seen.has(e)) overlap += G.el[e]; seen.set(e, 1); } }
   return { len, catLen, overlap };
 }
-function makeCandidate(theta, D, nVia) {
+async function makeCandidate(theta, D, nVia) {
   const hx = G.nx[home], hy = G.ny[home];
   let r = D / (2 * Math.PI * 1.25), best = null;
   for (let it = 0; it < 5; it++) {
@@ -413,6 +450,7 @@ function makeCandidate(theta, D, nVia) {
       if (nd < 0 || Math.hypot(G.nx[nd] - px, G.ny[nd] - py) > 250) nd = nearestNode(px, py, junction);
       if (nd >= 0 && nd !== wps[wps.length - 1]) wps.push(nd);
     }
+    await maybeYield();
     const ls = routeLoop(wps, true);
     if (!ls) { r *= 0.8; continue; }
     const s = summarize(ls);
@@ -438,9 +476,10 @@ async function generate() {
   const myGen = ++genId;
   const base = Math.random() * Math.PI * 2, N = 8, list = [];
   for (let i = 0; i < N; i++) {
-    const c = makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
+    const c = await makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
+    if (genId !== myGen) return;
     if (c) list.push(c);
-    if (i % 2 === 1) { setStatus(`Finding loops… ${Math.round(100 * (i + 1) / N)}%`); await frame(); }
+    setStatus(`Finding loops… ${Math.round(100 * (i + 1) / N)}%`);
   }
   list.sort((a, b) => a.score - b.score);
   if (genId !== myGen) return;
@@ -469,16 +508,20 @@ const totalLen = () => legs.reduce((a, l) => a + l.len, 0);
 const straight = (a, b) => Math.hypot(G.nx[a] - G.nx[b], G.ny[a] - G.ny[b]);
 
 // Junctions reachable from src within R metres of path.
+let nwD = null, nwS = null, nwStamp = 0;
+const nwHeap = new Heap();
 function nodesWithin(src, R) {
-  const dist = new Map([[src, 0]]), heap = new Heap(), out = [];
-  heap.push(0, src);
+  if (!nwD) { nwD = new Float64Array(G.n); nwS = new Int32Array(G.n); }
+  const st = ++nwStamp, heap = nwHeap, out = [];
+  heap.clear(); nwD[src] = 0; nwS[src] = st; heap.push(0, src);
   while (heap.size) {
-    const u = heap.pop(), du = dist.get(u);
+    const u = heap.pop(), du = heap.lastKey;
+    if (du > nwD[u]) continue; // stale entry
     if (du > R) break;
     if (du > 0 && junction(u)) out.push(u);
     for (let p = G.off[u]; p < G.off[u + 1]; p++) {
       const e = G.adj[p], v = G.ea[e] === u ? G.eb[e] : G.ea[e], dv = du + G.el[e];
-      if (dv <= R && dv < (dist.get(v) ?? Infinity)) { dist.set(v, dv); heap.push(dv, v); }
+      if (dv <= R && (nwS[v] !== st || dv < nwD[v])) { nwS[v] = st; nwD[v] = dv; heap.push(dv, v); }
     }
   }
   return out;
@@ -517,7 +560,7 @@ async function tuneDistance(includePinned) {
           const e = Math.abs(L - oldLen + a.len + b.len - D);
           if (!best || e < best.e) best = { i, c, a, b, e };
         }
-        await frame();
+        await maybeYield();
         if (my !== runId) return false;
       }
       if (!best || best.e >= Math.abs(err) - 1) break;
@@ -542,6 +585,9 @@ async function autoFit() {
   else setStatus("Couldn't fully match the distance with the free points", null, null, 3500);
 }
 function frame() { return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0))); }
+// Long searches hand the main thread back about every 30 ms (not after every step: each wait costs a frame).
+let lastYield = 0;
+async function maybeYield() { if (performance.now() - lastYield > 30) { await frame(); lastYield = performance.now(); } }
 
 // "Match distance": fine-tune free points first, then any point; scale the loop if still far off.
 async function matchDistance() {
@@ -570,7 +616,7 @@ async function scaleLoop() {
     if (!best || err < best.err) best = { wps, ls, err };
     if (err < 0.02) break;
     s *= Math.pow(D / t.len, 0.9);
-    await frame();
+    await maybeYield();
   }
   if (best) { waypoints = best.wps; legs = best.ls; pinned = waypoints.map(() => false); afterChange(false); }
 }
@@ -624,10 +670,11 @@ function afterChange(fit) {
 // ---------------------------------------------------------------- route geometry
 let routePts = new Float32Array(0), routeCum = new Float32Array(0), legStart = [];
 function edgePoints(e, fromNode, out) {
-  const g = G.geom[e], fwd = G.ea[e] === fromNode;
-  if (fwd) { for (let k = 0; k < g.length; k += 2) out.push(g[k], g[k + 1]); out.push(G.nx[G.eb[e]], G.ny[G.eb[e]]); }
-  else { for (let k = g.length - 2; k >= 0; k -= 2) out.push(g[k], g[k + 1]); out.push(G.nx[G.ea[e]], G.ny[G.ea[e]]); }
+  const P = G.gpts, g0 = G.goff[e], g1 = G.goff[e + 1];
+  if (G.ea[e] === fromNode) { for (let k = g0; k < g1; k++) out.push(P[2 * k], P[2 * k + 1]); out.push(G.nx[G.eb[e]], G.ny[G.eb[e]]); }
+  else { for (let k = g1 - 1; k >= g0; k--) out.push(P[2 * k], P[2 * k + 1]); out.push(G.nx[G.ea[e]], G.ny[G.ea[e]]); }
 }
+let routePath = null;
 function buildRouteGeometry() {
   const pts = []; legStart = [];
   if (waypoints.length) pts.push(G.nx[waypoints[0]], G.ny[waypoints[0]]);
@@ -639,6 +686,8 @@ function buildRouteGeometry() {
   routePts = Float32Array.from(pts);
   routeCum = new Float32Array(pts.length / 2);
   for (let i = 1; i < routeCum.length; i++) routeCum[i] = routeCum[i - 1] + Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+  routePath = null;
+  if (pts.length >= 4) { routePath = new Path2D(); routePath.moveTo(pts[0], pts[1]); for (let k = 2; k < pts.length; k += 2) routePath.lineTo(pts[k], pts[k + 1]); }
 }
 
 // ---------------------------------------------------------------- stats
@@ -661,80 +710,243 @@ function renderStats() {
 }
 
 // ---------------------------------------------------------------- map view
-const cv = $("map"), ctx = cv.getContext("2d");
+const cv = $("map"), ctx = cv.getContext("2d", { alpha: false });
 const view = { x: 0, y: 0, s: 0.3 }; // centre in metres, pixels per metre
-let W = 0, H = 0, DPR = 1, layers = null, colors = {};
+let W = 0, H = 0, DPR = 1, layers = null, colors = {}, fonts = {};
 function resize() {
-  const r = cv.getBoundingClientRect(); DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (dpr !== DPR) { DPR = dpr; clearTiles(); }
   W = r.width; H = r.height; cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); draw();
 }
-function readColors() { for (const k of ["--ground", "--water", "--park", "--road", "--road-case", "--major", "--major-case", "--sidewalk", "--trail", "--cycle", "--route", "--route-case", "--ink", "--panel", "--ink-2"]) colors[k] = css(k); }
-function buildLayers() {
-  const mk = () => new Path2D();
-  const L = { water: mk(), parks: mk(), sidewalk: mk(), quiet: mk(), major: mk(), trail: mk(), cycle: mk() };
-  const poly = (path, list) => { for (const rings of list) for (const r of rings) { path.moveTo(r[0], r[1]); for (let k = 2; k < r.length; k += 2) path.lineTo(r[k], r[k + 1]); path.closePath(); } };
-  poly(L.water, G.water); poly(L.parks, G.parks);
-  const pick = [ "cycle", "trail", "sidewalk", "sidewalk", "quiet", "major", "major", "major", "trail" ];
-  for (let e = 0; e < G.m; e++) {
-    const p = G.side[e] ? L.sidewalk : L[pick[G.ec[e]]], g = G.geom[e];
-    p.moveTo(G.nx[G.ea[e]], G.ny[G.ea[e]]);
-    for (let k = 0; k < g.length; k += 2) p.lineTo(g[k], g[k + 1]);
-    p.lineTo(G.nx[G.eb[e]], G.ny[G.eb[e]]);
+function readColors() {
+  for (const k of ["--ground", "--water", "--park", "--road", "--road-case", "--major", "--major-case", "--sidewalk", "--trail", "--cycle", "--route", "--route-case", "--ink", "--panel", "--ink-2"]) colors[k] = css(k);
+  fonts.body = css("--f-body"); fonts.display = css("--f-display");
+}
+
+// The base map (streets, parks, water) is drawn once into cached 256 px tiles per zoom level;
+// each frame only copies tiles and draws the route on top. Levels are half-octaves apart.
+// Geometry is bucketed into a coarse grid so a tile only touches what it covers.
+const TILE = 256, IDX_CELL = 400;
+const LAYER_OF_CAT = [0, 1, 2, 2, 3, 4, 4, 4, 1]; // cycle, trail, sidewalk, quiet, major
+// tiers: 0 = cycle/trail/major (always), 1 = quiet streets (not at city scale), 2 = sidewalks (street scale only)
+function buildIndex() {
+  const { m, nx, ny, ea, eb, goff, gpts, ec, side } = G;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < G.n; i++) { const x = nx[i], y = ny[i]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  for (const P of [G.water.pts, G.parks.pts]) for (let k = 0; k < P.length; k += 2) { const x = P[k], y = P[k + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const cols = Math.ceil((x1 - x0) / IDX_CELL) + 1, rows = Math.ceil((y1 - y0) / IDX_CELL) + 1;
+  // edge boxes and layers
+  const ebox = new Float32Array(4 * m), elayer = new Uint8Array(m), tier = new Uint8Array(m);
+  for (let e = 0; e < m; e++) {
+    let bx0 = Math.min(nx[ea[e]], nx[eb[e]]), bx1 = Math.max(nx[ea[e]], nx[eb[e]]), by0 = Math.min(ny[ea[e]], ny[eb[e]]), by1 = Math.max(ny[ea[e]], ny[eb[e]]);
+    for (let k = goff[e]; k < goff[e + 1]; k++) { const x = gpts[2 * k], y = gpts[2 * k + 1]; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+    ebox[4 * e] = bx0; ebox[4 * e + 1] = by0; ebox[4 * e + 2] = bx1; ebox[4 * e + 3] = by1;
+    const L = side[e] ? 2 : LAYER_OF_CAT[ec[e]]; elayer[e] = L; tier[e] = L === 2 ? 2 : L === 3 ? 1 : 0;
   }
-  // labels: named edges, long enough
-  const labels = [];
+  const polyBox = (P) => {
+    const b = new Float32Array(4 * P.count);
+    for (let p = 0; p < P.count; p++) {
+      let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+      for (let k = P.ring[P.poly[p]]; k < P.ring[P.poly[p + 1]]; k++) { const x = P.pts[2 * k], y = P.pts[2 * k + 1]; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+      b[4 * p] = bx0; b[4 * p + 1] = by0; b[4 * p + 2] = bx1; b[4 * p + 3] = by1;
+    }
+    return b;
+  };
+  const cellRange = (box, i) => [
+    Math.max(0, Math.floor((box[4 * i] - x0) / IDX_CELL)), Math.max(0, Math.floor((box[4 * i + 1] - y0) / IDX_CELL)),
+    Math.min(cols - 1, Math.floor((box[4 * i + 2] - x0) / IDX_CELL)), Math.min(rows - 1, Math.floor((box[4 * i + 3] - y0) / IDX_CELL))];
+  // CSR buckets: items of cell c are items[start[c] .. start[c+1]-1]
+  const bucket = (count, box, keep) => {
+    const start = new Int32Array(cols * rows + 1);
+    for (let i = 0; i < count; i++) { if (!keep(i)) continue; const [c0, r0, c1, r1] = cellRange(box, i); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) start[r * cols + c + 1]++; }
+    for (let c = 0; c < cols * rows; c++) start[c + 1] += start[c];
+    const items = new Int32Array(start[cols * rows]), fillp = start.slice(0, cols * rows);
+    for (let i = 0; i < count; i++) { if (!keep(i)) continue; const [c0, r0, c1, r1] = cellRange(box, i); for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) items[fillp[r * cols + c]++] = i; }
+    return { start, items, box, stamp: new Int32Array(count), st: 0 };
+  };
+  const wbox = polyBox(G.water), pbox = polyBox(G.parks);
+  return {
+    x0, y0, cols, rows, ebox, elayer,
+    tiers: [0, 1, 2].map((t) => bucket(m, ebox, (e) => tier[e] === t)),
+    water: bucket(G.water.count, wbox, () => true), parks: bucket(G.parks.count, pbox, () => true),
+  };
+}
+// ids in bucket b whose boxes overlap [x0,y0]-[x1,y1]; each id once
+function query(b, x0, y0, x1, y1) {
+  const I = layers.index, out = [], st = ++b.st, box = b.box;
+  const c0 = Math.max(0, Math.floor((x0 - I.x0) / IDX_CELL)), c1 = Math.min(I.cols - 1, Math.floor((x1 - I.x0) / IDX_CELL));
+  const r0 = Math.max(0, Math.floor((y0 - I.y0) / IDX_CELL)), r1 = Math.min(I.rows - 1, Math.floor((y1 - I.y0) / IDX_CELL));
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+    const cell = r * I.cols + c;
+    for (let p = b.start[cell]; p < b.start[cell + 1]; p++) {
+      const i = b.items[p]; if (b.stamp[i] === st) continue; b.stamp[i] = st;
+      if (box[4 * i] > x1 || box[4 * i + 2] < x0 || box[4 * i + 1] > y1 || box[4 * i + 3] < y0) continue;
+      out.push(i);
+    }
+  }
+  return out;
+}
+function buildLabels() {
+  const { nx, ny, ea, eb, goff, gpts } = G, labels = [];
   for (let e = 0; e < G.m; e++) {
     const c = G.ec[e]; if (!G.en[e] || G.el[e] < 140 || G.side[e] || c === 2 || c === 3) continue;
-    const g = G.geom[e], pts = [G.nx[G.ea[e]], G.ny[G.ea[e]], ...g, G.nx[G.eb[e]], G.ny[G.eb[e]]];
-    const i = Math.max(0, Math.floor(pts.length / 4) - 1) * 2;
-    const x = (pts[i] + pts[i + 2]) / 2, y = (pts[i + 1] + pts[i + 3]) / 2;
-    let a = Math.atan2(pts[i + 3] - pts[i + 1], pts[i + 2] - pts[i]); if (a > Math.PI / 2) a -= Math.PI; if (a < -Math.PI / 2) a += Math.PI;
-    labels.push({ x, y, a, t: G.names[G.en[e]], major: c >= 5, len: G.el[e] });
+    const g0 = goff[e], cnt = goff[e + 1] - g0 + 2;
+    const pt = (q) => q === 0 ? [nx[ea[e]], ny[ea[e]]] : q === cnt - 1 ? [nx[eb[e]], ny[eb[e]]] : [gpts[2 * (g0 + q - 1)], gpts[2 * (g0 + q - 1) + 1]];
+    const q = Math.max(0, Math.floor(cnt / 2) - 1), [ax, ay] = pt(q), [bx, by] = pt(q + 1);
+    let an = Math.atan2(by - ay, bx - ax); if (an > Math.PI / 2) an -= Math.PI; if (an < -Math.PI / 2) an += Math.PI;
+    labels.push({ x: (ax + bx) / 2, y: (ay + by) / 2, a: an, t: G.names[G.en[e]], major: c >= 5, len: G.el[e], w: 0, wf: "" });
   }
   labels.sort((p, q) => (q.major - p.major) || (q.len - p.len));
-  L.labels = labels;
-  return L;
+  return labels;
+}
+function buildLayers() { return { index: buildIndex(), labels: buildLabels() }; }
+
+const levelScale = (k) => Math.pow(2, k / 2);
+const levelFor = (s) => Math.ceil(2 * Math.log2(s) - 0.1); // tiles at or a bit above screen resolution: sharp
+const tiles = new Map(), tilePool = [];
+let maxTiles = 48;
+function clearTiles() { for (const t of tiles.values()) tilePool.push(t.cv); tiles.clear(); }
+function newTileCanvas() {
+  const size = Math.round(TILE * DPR);
+  let c = tilePool.pop();
+  if (!c) c = typeof OffscreenCanvas === "function" ? new OffscreenCanvas(size, size) : Object.assign(document.createElement("canvas"), { width: size, height: size });
+  if (c.width !== size) { c.width = size; c.height = size; }
+  return c;
+}
+function renderTile(k, i, j) {
+  const S = levelScale(k), w = TILE / S, x0 = i * w, y0 = j * w, x1 = x0 + w, y1 = y0 + w;
+  const cvT = newTileCanvas(), c = cvT.getContext("2d");
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.fillStyle = colors["--ground"]; c.fillRect(0, 0, cvT.width, cvT.height);
+  const sc = DPR * S;
+  c.setTransform(sc, 0, 0, sc, -x0 * sc, -y0 * sc);
+  c.lineCap = "round"; c.lineJoin = "round";
+  const mg = 12 / S, qx0 = x0 - mg, qy0 = y0 - mg, qx1 = x1 + mg, qy1 = y1 + mg;
+  const fillPolys = (P, b, color) => {
+    const ids = query(b, qx0, qy0, qx1, qy1); if (!ids.length) return;
+    const path = new Path2D();
+    for (const p of ids) for (let r = P.poly[p]; r < P.poly[p + 1]; r++) {
+      const k0 = P.ring[r], k1 = P.ring[r + 1]; if (k1 - k0 < 2) continue;
+      path.moveTo(P.pts[2 * k0], P.pts[2 * k0 + 1]);
+      for (let q = k0 + 1; q < k1; q++) path.lineTo(P.pts[2 * q], P.pts[2 * q + 1]);
+      path.closePath();
+    }
+    c.fillStyle = color; c.fill(path, "evenodd");
+  };
+  const I = layers.index;
+  fillPolys(G.parks, I.parks, colors["--park"]);
+  fillPolys(G.water, I.water, colors["--water"]);
+  // street layers; at city scale, edges smaller than a pixel are dropped (neighbours' round caps cover them)
+  const paths = [null, null, null, null, null], tiny = 0.6 / S;
+  const { nx, ny, ea, eb, goff, gpts } = G, eboxA = I.ebox, elayer = I.elayer;
+  const addTier = (t) => {
+    for (const e of query(I.tiers[t], qx0, qy0, qx1, qy1)) {
+      if (eboxA[4 * e + 2] - eboxA[4 * e] < tiny && eboxA[4 * e + 3] - eboxA[4 * e + 1] < tiny) continue;
+      const L = elayer[e], p = paths[L] || (paths[L] = new Path2D());
+      p.moveTo(nx[ea[e]], ny[ea[e]]);
+      for (let q = goff[e]; q < goff[e + 1]; q++) p.lineTo(gpts[2 * q], gpts[2 * q + 1]);
+      p.lineTo(nx[eb[e]], ny[eb[e]]);
+    }
+  };
+  const showSide = S > 0.9, showQuiet = S > 0.09;
+  addTier(0); if (showQuiet) addTier(1); if (showSide) addTier(2);
+  const px = (v) => v / S, z = Math.min(1, Math.max(0, (Math.log2(S) + 3) / 4)); // 0 at city scale, 1 at street scale
+  const stroke = (L, color, width) => { if (paths[L]) { c.strokeStyle = color; c.lineWidth = px(width); c.stroke(paths[L]); } };
+  if (showSide) stroke(2, colors["--sidewalk"], 1.2);
+  stroke(3, colors["--road-case"], 1.6 + 4 * z);
+  stroke(4, colors["--major-case"], 2.6 + 6 * z);
+  stroke(3, colors["--road"], 0.8 + 3 * z);
+  stroke(4, colors["--major"], 1.4 + 4.5 * z);
+  stroke(1, colors["--trail"], 0.9 + 1.4 * z);
+  stroke(0, colors["--cycle"], 1.6 + 2.2 * z);
+  return cvT;
+}
+function getTile(k, i, j, mayRender) {
+  const key = k + "/" + i + "/" + j;
+  let t = tiles.get(key);
+  if (t) { tiles.delete(key); tiles.set(key, t); return t; } // keep LRU order
+  if (!mayRender) return null;
+  t = { cv: renderTile(k, i, j) };
+  tiles.set(key, t);
+  while (tiles.size > maxTiles) { const [oldKey, old] = tiles.entries().next().value; tiles.delete(oldKey); tilePool.push(old.cv); }
+  return t;
+}
+// device-pixel rectangle of a world rectangle (rounded so neighbouring tiles meet without seams)
+function devRect(x0, y0, x1, y1) {
+  const s = view.s, X0 = Math.round(((x0 - view.x) * s + W / 2) * DPR), Y0 = Math.round(((y0 - view.y) * s + H / 2) * DPR);
+  const X1 = Math.round(((x1 - view.x) * s + W / 2) * DPR), Y1 = Math.round(((y1 - view.y) * s + H / 2) * DPR);
+  return [X0, Y0, X1 - X0, Y1 - Y0];
+}
+function tileRange(k) {
+  const w = TILE / levelScale(k), [ax, ay] = toWorld(0, 0), [bx, by] = toWorld(W, H);
+  return [Math.floor(ax / w), Math.floor(ay / w), Math.floor(bx / w), Math.floor(by / w), w];
+}
+// While a tile isn't ready, stretch whatever is cached at nearby levels over its area.
+function drawFallback(k, x0, y0, x1, y1) {
+  for (const dk of [-1, 1, -2, 2, -3, -4, 3, -5, -6]) {
+    const k2 = k + dk, w2 = TILE / levelScale(k2);
+    const i0 = Math.floor(x0 / w2), j0 = Math.floor(y0 / w2), i1 = Math.floor((x1 - 1e-3) / w2), j1 = Math.floor((y1 - 1e-3) / w2);
+    if ((i1 - i0 + 1) * (j1 - j0 + 1) > 16) continue;
+    const got = []; let all = true;
+    for (let j = j0; j <= j1 && all; j++) for (let i = i0; i <= i1; i++) { const t = tiles.get(k2 + "/" + i + "/" + j); if (!t) { all = false; break; } got.push([t, i, j]); }
+    if (!all) continue;
+    ctx.save(); ctx.beginPath(); ctx.rect(...devRect(x0, y0, x1, y1)); ctx.clip();
+    for (const [t, i, j] of got) ctx.drawImage(t.cv, ...devRect(i * w2, j * w2, (i + 1) * w2, (j + 1) * w2));
+    ctx.restore();
+    return;
+  }
 }
 const toScreen = (x, y) => [(x - view.x) * view.s + W / 2, (y - view.y) * view.s + H / 2];
 const toWorld = (sx, sy) => [(sx - W / 2) / view.s + view.x, (sy - H / 2) / view.s + view.y];
 
-let drawQueued = false;
+let drawQueued = false, prefetchTimer = 0;
 function draw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; drawNow(); }); } }
 function drawNow() {
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  ctx.fillStyle = colors["--ground"]; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = colors["--ground"]; ctx.fillRect(0, 0, cv.width, cv.height);
   if (!layers) return;
-  const s = view.s;
-  ctx.save();
-  ctx.setTransform(DPR * s, 0, 0, DPR * s, DPR * (W / 2 - view.x * s), DPR * (H / 2 - view.y * s));
-  ctx.lineCap = "round"; ctx.lineJoin = "round";
-  ctx.fillStyle = colors["--park"]; ctx.fill(layers.parks, "evenodd");
-  ctx.fillStyle = colors["--water"]; ctx.fill(layers.water, "evenodd");
-  const px = (v) => v / s;
-  const z = Math.min(1, Math.max(0, (Math.log2(s) + 3) / 4)); // 0 at city scale, 1 at street scale
-  if (s > 0.9) { ctx.strokeStyle = colors["--sidewalk"]; ctx.lineWidth = px(1.2); ctx.stroke(layers.sidewalk); }
-  const showQuiet = s > 0.09; // skip side streets when zoomed out to a whole marathon
-  if (showQuiet) { ctx.strokeStyle = colors["--road-case"]; ctx.lineWidth = px(1.6 + 4 * z); ctx.stroke(layers.quiet); }
-  ctx.strokeStyle = colors["--major-case"]; ctx.lineWidth = px(2.6 + 6 * z); ctx.stroke(layers.major);
-  if (showQuiet) { ctx.strokeStyle = colors["--road"]; ctx.lineWidth = px(0.8 + 3 * z); ctx.stroke(layers.quiet); }
-  ctx.strokeStyle = colors["--major"]; ctx.lineWidth = px(1.4 + 4.5 * z); ctx.stroke(layers.major);
-  ctx.strokeStyle = colors["--trail"]; ctx.lineWidth = px(0.9 + 1.4 * z); ctx.stroke(layers.trail);
-  ctx.strokeStyle = colors["--cycle"]; ctx.lineWidth = px(1.6 + 2.2 * z); ctx.stroke(layers.cycle);
-  // route
-  if (routePts.length >= 4) {
-    const rp = new Path2D(); rp.moveTo(routePts[0], routePts[1]);
-    for (let k = 2; k < routePts.length; k += 2) rp.lineTo(routePts[k], routePts[k + 1]);
-    ctx.strokeStyle = colors["--route-case"]; ctx.globalAlpha = 0.35; ctx.lineWidth = px(9); ctx.stroke(rp);
-    ctx.globalAlpha = 1; ctx.strokeStyle = colors["--route"]; ctx.lineWidth = px(5); ctx.stroke(rp);
+  const s = view.s, k = levelFor(s), [i0, j0, i1, j1, w] = tileRange(k);
+  maxTiles = Math.max(48, 3 * (i1 - i0 + 3) * (j1 - j0 + 3));
+  // render missing tiles for ~10 ms per frame (centre first), stretch other levels meanwhile
+  const t0 = performance.now(), need = [];
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) need.push([i, j]);
+  const ci = (i0 + i1) / 2, cj = (j0 + j1) / 2;
+  need.sort((a, b) => Math.hypot(a[0] - ci, a[1] - cj) - Math.hypot(b[0] - ci, b[1] - cj));
+  let pending = false;
+  for (const [i, j] of need) {
+    const t = getTile(k, i, j, performance.now() - t0 < 10);
+    if (t) ctx.drawImage(t.cv, ...devRect(i * w, j * w, (i + 1) * w, (j + 1) * w));
+    else { pending = true; drawFallback(k, i * w, j * w, (i + 1) * w, (j + 1) * w); }
   }
-  ctx.restore();
+  // route
+  if (routePath) {
+    ctx.setTransform(DPR * s, 0, 0, DPR * s, DPR * (W / 2 - view.x * s), DPR * (H / 2 - view.y * s));
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.strokeStyle = colors["--route-case"]; ctx.globalAlpha = 0.35; ctx.lineWidth = 9 / s; ctx.stroke(routePath);
+    ctx.globalAlpha = 1; ctx.strokeStyle = colors["--route"]; ctx.lineWidth = 5 / s; ctx.stroke(routePath);
+  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   drawLabels();
   drawRouteMarks();
+  clearTimeout(prefetchTimer);
+  if (pending) draw();
+  else prefetchTimer = setTimeout(prefetch, 120);
+}
+// When idle, render the ring of tiles just off screen so short pans never show blanks.
+function prefetch() {
+  if (!layers || drawQueued) return;
+  const k = levelFor(view.s), [i0, j0, i1, j1] = tileRange(k), t0 = performance.now();
+  for (let j = j0 - 1; j <= j1 + 1; j++) for (let i = i0 - 1; i <= i1 + 1; i++) {
+    if (tiles.has(k + "/" + i + "/" + j)) continue;
+    if (performance.now() - t0 > 8) { prefetchTimer = setTimeout(prefetch, 30); return; }
+    getTile(k, i, j, true);
+  }
 }
 function drawLabels() {
   if (view.s < 0.55) return;
   const boxes = [];
-  ctx.font = `500 ${view.s > 1.5 ? 12 : 11}px ${css("--f-body")}`;
+  ctx.font = `500 ${view.s > 1.5 ? 12 : 11}px ${fonts.body}`;
+  const wf = ctx.font + fontEpoch;
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.lineWidth = 3; ctx.strokeStyle = colors["--ground"]; ctx.fillStyle = colors["--ink-2"];
   let drawn = 0;
@@ -742,7 +954,8 @@ function drawLabels() {
     if (!l.major && view.s < 0.9) continue;
     const [x, y] = toScreen(l.x, l.y);
     if (x < -50 || y < -20 || x > W + 50 || y > H + 20) continue;
-    const w = ctx.measureText(l.t).width;
+    if (l.wf !== wf) { l.w = ctx.measureText(l.t).width; l.wf = wf; }
+    const w = l.w;
     if (w > l.len * view.s * 0.9) continue;
     const r = w / 2 + 6;
     if (boxes.some((b) => Math.abs(b[0] - x) < b[2] + r && Math.abs(b[1] - y) < 16)) continue;
@@ -751,11 +964,12 @@ function drawLabels() {
     if (++drawn > 160) break;
   }
 }
+let fontEpoch = 0;
 function drawRouteMarks() {
   if (routePts.length < 4) return;
   const total = routeCum[routeCum.length - 1];
   // km markers
-  ctx.font = `700 11px ${css("--f-display")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `700 11px ${fonts.display}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   const step = view.s < 0.12 ? 5000 : view.s < 0.25 ? 2000 : 1000;
   let i = 0;
   for (let d = step; d < total - step * 0.3; d += step) {
@@ -1166,15 +1380,31 @@ function wire() {
   $("zfit").onclick = fitRoute;
   window.addEventListener("resize", resize);
   const mq = matchMedia("(prefers-color-scheme: dark)");
-  const recolor = () => { readColors(); draw(); };
+  const recolor = () => { readColors(); clearTiles(); draw(); };
+  document.fonts?.addEventListener?.("loadingdone", () => { fontEpoch++; draw(); });
   mq.addEventListener?.("change", recolor);
   new MutationObserver(recolor).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+}
+
+// ---------------------------------------------------------------- install / offline
+function setupApp() {
+  // web fonts load without holding up the first paint
+  const fl = $("font-css");
+  if (fl) { if (fl.sheet) fl.media = "all"; else fl.addEventListener("load", () => { fl.media = "all"; }); }
+  // installable app (Chrome: menu → Install app, or the button); not inside an embedding frame
+  let top = false; try { top = window.top === window; } catch {}
+  if (top && "serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost"))
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  let prompt = null; const btn = $("install");
+  addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); prompt = e; btn.hidden = false; });
+  addEventListener("appinstalled", () => { prompt = null; btn.hidden = true; });
+  btn.onclick = async () => { if (!prompt) return; btn.hidden = true; prompt.prompt(); try { await prompt.userChoice; } catch {} prompt = null; };
 }
 
 // ---------------------------------------------------------------- boot
 let DATA = null;
 async function boot() {
-  wire(); readColors();
+  setupApp(); wire(); readColors();
   const st = store();
   if (st.dist) ui.dist.value = st.dist;
   if (st.pref != null) ui.pref.value = st.pref;
@@ -1182,15 +1412,21 @@ async function boot() {
   setDistLabel(); setPref(+ui.pref.value / 100);
   resize();
   try {
-    const res = await fetch("map-data.json");
+    const res = await fetch("map-data.bin");
     if (!res.ok) throw new Error(res.status);
-    let buf = new Uint8Array(await res.arrayBuffer());
-    if (buf[0] === 0x1f && buf[1] === 0x8b) { // still gzipped (server didn't decode it)
+    const total = +res.headers.get("content-length") || 0, parts = [];
+    let got = 0;
+    if (res.body && total) {
+      const rd = res.body.getReader();
+      for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; if (got <= total) setStatus(`Loading the map… ${Math.round(99 * got / total)}%`); }
+    } else parts.push(new Uint8Array(await res.arrayBuffer()));
+    let buf = new Uint8Array(await new Blob(parts).arrayBuffer());
+    if (buf[0] === 0x1f && buf[1] === 0x8b) // gzipped file (unless the server already decoded it)
       buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-    }
-    DATA = JSON.parse(new TextDecoder().decode(buf));
+    const map = parseMap(buf);
+    DATA = map.meta;
+    G = buildGraph(map);
   } catch (e) { setStatus("The map file didn't load. Reload the page to try again."); return; }
-  G = buildGraph(DATA);
   initSaved();
   layers = buildLayers();
   const h = DATA.home;

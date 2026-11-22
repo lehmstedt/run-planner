@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "Verdun Run Loops",
+  "short_name": "Run Loops",
+  "description": "Running loops from home that stick to bike paths and park trails. Works offline.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#e9edeb",
+  "theme_color": "#e9edeb",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
