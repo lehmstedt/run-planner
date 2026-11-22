@@ -1412,7 +1412,9 @@ async function boot() {
   setDistLabel(); setPref(+ui.pref.value / 100);
   resize();
   try {
-    const res = await fetch("map-data.bin");
+    // map-data.bin.wasm: the same bytes, for hosts that only serve known file types (Claude artifacts)
+    let res = await fetch("map-data.bin");
+    if (!res.ok) res = await fetch("map-data.bin.wasm");
     if (!res.ok) throw new Error(res.status);
     const total = +res.headers.get("content-length") || 0, parts = [];
     let got = 0;
