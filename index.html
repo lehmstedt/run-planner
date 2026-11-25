@@ -130,6 +130,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .saved .del:hover { color: var(--route); background: var(--panel); }
 .saved .open:focus-visible, .saved .del:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .saved-note { font-size: 12px; color: var(--ink-2); margin: 0; }
+.gmaps-note { font-size: 12px; line-height: 1.4; color: var(--route); margin: 0; }
 .foot { font-size: 11px; color: var(--ink-2); margin-top: auto; line-height: 1.5; }
 
 .status { position: absolute; left: 50%; top: calc(64px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); padding: 8px 14px; border-radius: 999px; font-size: 13px; display: flex; gap: 10px; align-items: center; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
@@ -253,6 +254,7 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
         <button class="btn small" id="gmaps" disabled>Open in Google Maps</button>
         <button class="btn small" id="kml" disabled title="KML file to import into Google My Maps">Export for My Maps</button>
       </div>
+      <p class="gmaps-note" id="gmaps-note" role="status" hidden></p>
     </section>
 
     <section class="block more" aria-labelledby="saved-label">
@@ -793,6 +795,9 @@ function afterChange(fit) {
   buildRouteGeometry();
   renderStats();
   ui.fitDist.disabled = ui.gpx.disabled = ui.kml.disabled = ui.gmaps.disabled = ui.saveBtn.disabled = !legs.length;
+  const extra = viaCount() - GMAPS_STOPS;
+  ui.gmapsNote.hidden = extra <= 0;
+  if (extra > 0) ui.gmapsNote.textContent = `This loop has ${viaCount()} points but Google Maps takes ${GMAPS_STOPS}: remove ${extra} (tap a dot) so the Google Maps export goes through all of them.`;
   save({ wps: waypoints.map((k) => [G.nx[k], G.ny[k]]), pinned });
   if (fit) fitRoute(); else draw();
 }
@@ -1206,7 +1211,8 @@ cv.addEventListener("pointerdown", (ev) => {
   const wp = hitWaypoint(sx, sy, touch);
   if (wp > 0) { drag = { type: "wp", wp, sx, sy, moved: false, before: snapshot() }; return; }
   const leg = routePts.length ? hitRoute(sx, sy, touch) : -1;
-  if (leg >= 0) { drag = { type: "newwp", leg, sx, sy, moved: false, before: snapshot() }; return; }
+  if (leg >= 0 && viaCount() < GMAPS_STOPS) { drag = { type: "newwp", leg, sx, sy, moved: false, before: snapshot() }; return; }
+  if (leg >= 0) setStatus(`${GMAPS_STOPS} points is the most Google Maps takes: remove a dot to add another`, null, null, 3500);
   drag = { type: "pan", sx, sy, vx: view.x, vy: view.y, moved: false };
   cv.classList.add("dragging");
 });
@@ -1340,18 +1346,41 @@ ${marks.join("\n")}
 }
 
 // ---------------------------------------------------------------- Google Maps export
-// Google Maps directions links take at most 9 stops between origin and destination, and Google
-// picks its own path between them, so the loop is pinned with stops spread evenly along it.
+// Google Maps directions links take at most 9 stops between origin and destination, so a loop has at
+// most that many points (dots). Google picks its own path between stops, so the link goes through
+// every dot and the spare stops are spread over the longest stretches to keep it on the planned streets.
 const GMAPS_STOPS = 9;
+const viaCount = () => Math.max(0, waypoints.length - 1);
 function googleMapsUrl() {
   const total = routeCum[routeCum.length - 1], n = routeCum.length;
   const fmt = (i) => toLatLon(routePts[2 * i], routePts[2 * i + 1]).map((v) => v.toFixed(6)).join(",");
-  const stops = [];
-  for (let s = 1, i = 0; s <= GMAPS_STOPS; s++) {
-    const d = total * s / (GMAPS_STOPS + 1);
-    while (i < n - 1 && routeCum[i] < d) i++;
-    if (stops[stops.length - 1] !== i) stops.push(i);
+  let stops = [];
+  if (viaCount() > GMAPS_STOPS) { // too many dots: evenly spread stops instead
+    for (let s = 1, i = 0; s <= GMAPS_STOPS; s++) {
+      const d = total * s / (GMAPS_STOPS + 1);
+      while (i < n - 1 && routeCum[i] < d) i++;
+      stops.push(i);
+    }
+  } else {
+    // anchors: start, every dot, finish; split the stretches between them, longest first
+    const anchors = [0, ...legStart.slice(1, legs.length), n - 1];
+    const parts = anchors.slice(1).map(() => 1);
+    const gap = (g) => (routeCum[anchors[g + 1]] - routeCum[anchors[g]]) / parts[g];
+    for (let k = viaCount(); k < GMAPS_STOPS; k++) {
+      let g = 0; for (let j = 1; j < parts.length; j++) if (gap(j) > gap(g)) g = j;
+      parts[g]++;
+    }
+    for (let g = 0, i = 0; g < parts.length; g++) {
+      if (g) stops.push(anchors[g]);
+      const d0 = routeCum[anchors[g]], d1 = routeCum[anchors[g + 1]];
+      for (let q = 1; q < parts[g]; q++) {
+        const d = d0 + (d1 - d0) * q / parts[g];
+        i = Math.max(i, anchors[g]); while (i < n - 1 && routeCum[i] < d) i++;
+        stops.push(i);
+      }
+    }
   }
+  stops = stops.filter((i, k) => i > 0 && i < n - 1 && i !== stops[k - 1]);
   const p = new URLSearchParams({ api: "1", origin: fmt(0), destination: fmt(n - 1), travelmode: "walking" });
   p.set("waypoints", stops.map(fmt).join("|"));
   return "https://www.google.com/maps/dir/?" + p.toString();
@@ -1361,7 +1390,11 @@ async function openGoogleMaps() {
   const url = googleMapsUrl();
   let w = null;
   try { w = window.open(url, "_blank"); if (w) w.opener = null; } catch {}
-  if (w) { setStatus("Opened in Google Maps: it may take slightly different streets between the stops", null, null, 5000); return; }
+  if (w) {
+    setStatus(viaCount() > GMAPS_STOPS ? `Opened in Google Maps, but without all your ${viaCount()} points: it takes ${GMAPS_STOPS}`
+      : "Opened in Google Maps: it may take slightly different streets between the stops", null, null, 5000);
+    return;
+  }
   try { await navigator.clipboard.writeText(url); setStatus("Pop-up blocked: Google Maps link copied", null, null, 4000); }
   catch { setStatus("Couldn't open Google Maps", "Try again", () => { location.href = url; }); }
 }
@@ -1485,7 +1518,7 @@ function wire() {
   Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), kml: $("kml"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit"),
-    saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note") });
+    saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note"), gmapsNote: $("gmaps-note") });
   $("save-form").addEventListener("submit", saveCurrent);
   for (const v of PRESETS) {
     const b = document.createElement("button"); b.className = "chip"; b.dataset.v = v; b.textContent = v === 21.1 ? "Half · 21.1" : v === 42.2 ? "Marathon · 42.2" : v + " km";
