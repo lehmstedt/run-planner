@@ -434,36 +434,40 @@ class Heap { // binary min-heap on typed arrays; lastKey = key of the last pop
 // Leg penalties while building a loop (discourages reusing streets): per-edge weight, valid when penS[e] === the loop's id.
 let penW = null, penS = null, penId = 0;
 function newPenalty() { if (!penW) { penW = new Float32Array(G.m); penS = new Int32Array(G.m); } return ++penId; }
-// Turn costs (in metres of extra running), charged only at junctions so curvy trails aren't penalised.
-// A runner loses rhythm at every corner and hates doubling back: gentle bends are free, a right angle
-// costs TURN_M, a hairpin about twice that plus REVERSE_M.
-const TURN_M = 40, REVERSE_M = 350, FREE_COS = 0.9, REVERSE_COS = -0.8;
-// cosine of the change of direction when arriving at u along edge a and leaving along edge b
-function turnCos(u, a, b, w = u) { // w: node where a arrives, if a short connector lies between a and b
+// Turn costs (in metres of extra running). Loops should have as few corners as possible, and a runner
+// hates doubling back: gentle bends are free, a right angle costs TURN_M (the router will run 300 m
+// further to avoid one), a hairpin about twice that plus REVERSE_M.
+// The change of direction is measured across short connectors (up to SHORT_M): crossing a street to carry
+// on the same way is no corner, and two right angles around a crossing that add up to a hairpin are a turn-back.
+const TURN_M = 300, REVERSE_M = 350, FREE_COS = 0.9, REVERSE_COS = -0.8, CORNER_COS = 0.64, SHORT_M = 35;
+// cosine of the change of direction when arriving at w along edge a and leaving u along edge b
+function turnCos(u, a, b, w = u) {
   const { ea, dA, dB } = G;
   const ia = 2 * a, ib = 2 * b;
   const ax = ea[a] === w ? dA[ia] : dB[ia], ay = ea[a] === w ? dA[ia + 1] : dB[ia + 1];
   const bx = ea[b] === u ? dA[ib] : dB[ib], by = ea[b] === u ? dA[ib + 1] : dB[ib + 1];
   return a === b ? -1 : -(ax * bx + ay * by);
 }
-// Doubling back through a short connector (crossing to the other sidewalk, a short jog): two right
-// angles that add up to a hairpin. SHORT_M: longest connector that still counts.
-const SHORT_M = 35;
-function backViaShort(u, inE, e, s, startEdge) {
-  if (G.el[inE] > SHORT_M) return false;
-  const w = G.ea[inE] === u ? G.eb[inE] : G.ea[inE], pe = w === s ? startEdge : cameFrom[w];
-  return pe >= 0 && pe !== inE && turnCos(u, pe, e, w) < REVERSE_COS;
+// Direction change (cosine) charged at u when arriving on inE and leaving on e, or 2 when nothing is
+// charged there. pe: the edge before inE, or -1. Corners only count at junctions, so curvy trails are free;
+// entering a short connector defers the decision to its far end, where the whole change is measured.
+function cornerCos(u, inE, e, pe) {
+  if (inE < 0) return 2;
+  const el = G.el, shortIn = el[inE] <= SHORT_M;
+  if (!shortIn && el[e] <= SHORT_M) return 2;
+  if (shortIn && pe >= 0 && pe !== inE) {
+    const w = G.ea[inE] === u ? G.eb[inE] : G.ea[inE];
+    return junction(u) || junction(w) ? turnCos(u, pe, e, w) : 2;
+  }
+  return junction(u) ? turnCos(u, inE, e) : 2;
 }
-function turnCost(u, a, b) {
-  if (a < 0 || G.off[u + 1] - G.off[u] < 3) return 0;
-  const c = turnCos(u, a, b);
-  if (c > FREE_COS) return 0;
-  return TURN_M * (1 - c) + (c < REVERSE_COS ? REVERSE_M : 0);
-}
+const turnCost = (c) => c > FREE_COS ? 0 : TURN_M * (1 - c) + (c < REVERSE_COS ? REVERSE_M : 0);
 const lastEdge = (l) => l && l.edges.length ? l.edges[l.edges.length - 1] : -1;
+const lastEdge2 = (l) => l && l.edges.length > 1 ? l.edges[l.edges.length - 2] : -1;
 const routeHeap = new Heap();
-// startEdge: the edge the runner arrives on at s (previous leg), so the leg doesn't start by turning back.
-function route(s, t, penalty, startEdge = -1) {
+// startEdge: the edge the runner arrives on at s (previous leg), so the leg doesn't start by turning back;
+// startPrev: the edge before it.
+function route(s, t, penalty, startEdge = -1, startPrev = -1) {
   if (s === t) return { nodes: [s], edges: [], len: 0 };
   const { nx, ny, ea, eb, ec, el, off, adj } = G;
   if (!gScore) { gScore = new Float64Array(G.n); cameFrom = new Int32Array(G.n); closedStamp = new Int32Array(G.n); openStamp = new Int32Array(G.n); }
@@ -479,13 +483,15 @@ function route(s, t, penalty, startEdge = -1) {
     if (closedStamp[u] === stamp) continue;
     closedStamp[u] = stamp;
     if (u === t) break;
-    const gu = gScore[u], inE = u === s ? startEdge : cameFrom[u], turns = inE >= 0 && off[u + 1] - off[u] >= 3;
+    const gu = gScore[u], inE = u === s ? startEdge : cameFrom[u];
+    let pe = -1;
+    if (inE >= 0 && el[inE] <= SHORT_M) { if (u === s) pe = startPrev; else { const w = ea[inE] === u ? eb[inE] : ea[inE]; pe = w === s ? startEdge : cameFrom[w]; } }
     for (let p = off[u]; p < off[u + 1]; p++) {
       const e = adj[p], v = ea[e] === u ? eb[e] : ea[e];
       if (closedStamp[v] === stamp) continue;
       let w = el[e] * costF[ec[e]];
       if (penalty && penS[e] === penalty) w *= penW[e];
-      if (turns) { w += turnCost(u, inE, e); if (backViaShort(u, inE, e, s, startEdge)) w += REVERSE_M; }
+      if (inE >= 0) { const c = cornerCos(u, inE, e, pe); if (c < FREE_COS) w += turnCost(c); }
       const g = gu + w + 0.5;
       if (openStamp[v] !== stamp || g < gScore[v]) { gScore[v] = g; openStamp[v] = stamp; cameFrom[v] = e; heap.push(g + h(v), v); }
     }
@@ -506,7 +512,7 @@ function legInfo(r) {
 function routeLoop(wps, pen) {
   const penalty = pen ? newPenalty() : 0, out = [];
   for (let i = 0; i < wps.length; i++) {
-    const r = route(wps[i], wps[(i + 1) % wps.length], penalty, lastEdge(out[i - 1]));
+    const r = route(wps[i], wps[(i + 1) % wps.length], penalty, lastEdge(out[i - 1]), lastEdge2(out[i - 1]));
     if (!r) return null;
     out.push(legInfo(r));
     if (penalty) for (const e of r.edges) { if (penS[e] === penalty) penW[e] *= 4; else { penS[e] = penalty; penW[e] = 4; } }
@@ -519,24 +525,19 @@ function summarize(ls) {
     for (const e of l.edges) { if (seen.has(e)) overlap += G.el[e]; seen.set(e, 1); } }
   return { len, catLen, overlap, ...countTurns(ls) };
 }
-// Corners (direction changes over ~50°, at junctions) and turn-backs (hairpins) along the loop,
-// including where one leg hands over to the next. Short crossing jogs count once.
+// Corners (direction changes over ~50°, at junctions, measured across short connectors) and turn-backs
+// (hairpins) along the loop, including where one leg hands over to the next.
 function countTurns(ls) {
-  let turns = 0, backs = 0, prev = -1, prev2 = -1, prevNode = -1, lastBack = -9;
-  for (let li = 0; li < ls.length; li++) {
-    const l = ls[li];
-    for (let i = 0; i < l.edges.length; i++) {
-      const e = l.edges[i], u = l.nodes[i];
-      if (prev >= 0 && G.off[u + 1] - G.off[u] >= 3) {
-        const c = turnCos(u, prev, e);
-        const viaShort = prev2 >= 0 && G.el[prev] <= SHORT_M && turnCos(u, prev2, e, prevNode) < REVERSE_COS;
-        if (c < REVERSE_COS || viaShort) { if (lastBack < 0) backs++; lastBack = 1; } else { lastBack = -9; if (c < 0.64) turns++; }
-      } else lastBack = -9;
-      prev2 = prev; prevNode = u; prev = e;
-    }
+  let turns = 0, backs = 0, prev = -1, prev2 = -1;
+  for (const l of ls) for (let i = 0; i < l.edges.length; i++) {
+    const e = l.edges[i], c = prev >= 0 ? cornerCos(l.nodes[i], prev, e, prev2) : 2;
+    if (c < REVERSE_COS) backs++; else if (c < CORNER_COS) turns++;
+    prev2 = prev; prev = e;
   }
   return { turns, backs };
 }
+// Weight of corners per km when ranking loops.
+const TURN_SCORE = 1.5;
 async function makeCandidate(theta, D, nVia) {
   const hx = G.nx[home], hy = G.ny[home];
   let r = D / (2 * Math.PI * 1.25), best = null;
@@ -563,7 +564,7 @@ async function makeCandidate(theta, D, nVia) {
   const busy = (best.catLen[2] + best.catLen[5] + best.catLen[6] + best.catLen[7]) / best.len;
   const path = (best.catLen[0] + best.catLen[1]) / best.len;
   const perKm = 1000 / best.len;
-  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5 + best.turns * perKm * 0.06 + best.backs * 0.5;
+  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5 + best.turns * perKm * TURN_SCORE + best.backs * 0.5;
   return best;
 }
 async function generate() {
@@ -575,9 +576,10 @@ async function generate() {
   await frame();
   const nVia = D < 6000 ? 3 : D < 14000 ? 4 : D < 30000 ? 5 : 6;
   const myGen = ++genId;
+  // half the directions also try one via point less: every via point tends to add a corner
   const base = Math.random() * Math.PI * 2, N = 8, list = [];
   for (let i = 0; i < N; i++) {
-    const c = await makeCandidate(base + i * 2 * Math.PI / N, D, nVia);
+    const c = await makeCandidate(base + i * 2 * Math.PI / N, D, i % 2 ? nVia - 1 : nVia);
     if (genId !== myGen) return;
     if (c) list.push(c);
     setStatus(`Finding loops… ${Math.round(100 * (i + 1) / N)}%`);
@@ -628,21 +630,27 @@ function nodesWithin(src, R) {
   return out;
 }
 
-// Nudge the unpinned via points, one junction move at a time, until the loop length
-// is within tolerance of the target. Pinned points (placed by the runner) never move.
+// Nudge the unpinned via points, one junction move at a time, until the loop length is within
+// tolerance of the target and no move removes a corner. Pinned points (placed by the runner) never move.
+// A loop is scored by how far it misses the target (beyond tolerance) plus CORNER_W metres per corner,
+// so a free point slides to where the route runs straight through it, but never off the target.
 // runId changes on every edit or new adjustment; an adjustment whose runId is stale stops.
+const CORNER_W = 8, OFF_TARGET = 200;
 let tuning = false, runId = 0;
 const bumpRun = () => ++runId;
+function loopScore(len, t, D, tol) {
+  const miss = Math.abs(len - D) - tol;
+  return (miss > 0 ? 4 * miss + OFF_TARGET : 0) + t.turns * CORNER_W + t.backs * 400;
+}
 async function tuneDistance(includePinned) {
   if (waypoints.length < 2) return false;
   const my = bumpRun();
   tuning = true;
   const D = targetM(), tol = tolerance(D);
   try {
-    for (let pass = 0; pass < 10; pass++) {
-      const L = totalLen(), err = L - D;
-      if (Math.abs(err) <= tol) break;
-      const n = waypoints.length;
+    for (let pass = 0; pass < 24; pass++) {
+      const L = totalLen(), err = L - D, n = waypoints.length;
+      const cur0 = loopScore(L, countTurns(legs), D, tol);
       let movable = [];
       for (let i = 1; i < n; i++) if (includePinned || !pinned[i]) movable.push(i);
       if (!movable.length) break;
@@ -651,23 +659,25 @@ async function tuneDistance(includePinned) {
         const prev = waypoints[i - 1], cur = waypoints[i], next = waypoints[(i + 1) % n];
         const oldLen = legs[i - 1].len + legs[i].len;
         const ratio = Math.max(1, oldLen / ((straight(prev, cur) + straight(cur, next)) || 1));
+        const est = (c) => Math.abs(L - oldLen + (straight(prev, c) + straight(c, next)) * ratio - D);
+        // the closest to the target within reach, and nearby points that keep the length (to straighten)
         const R = Math.min(3000, Math.max(250, Math.abs(err) * 1.2));
-        const cands = nodesWithin(cur, R).filter((c) => c !== prev && c !== next)
-          .map((c) => ({ c, est: Math.abs(L - oldLen + (straight(prev, c) + straight(c, next)) * ratio - D) }))
-          .sort((a, b) => a.est - b.est).slice(0, 10);
-        const inPrev = i >= 2 ? lastEdge(legs[i - 2]) : -1, outNext = (i + 1) % n ? legs[(i + 1) % n].edges[0] : undefined;
-        for (const { c } of cands) {
-          const a = route(prev, c, 0, inPrev), b = route(c, next, 0, lastEdge(a));
+        const far = nodesWithin(cur, R).filter((c) => c !== prev && c !== next).map((c) => ({ c, est: est(c) })).sort((a, b) => a.est - b.est);
+        const near = R > 600 ? nodesWithin(cur, 600).filter((c) => c !== prev && c !== next).map((c) => ({ c, est: est(c) })).sort((a, b) => a.est - b.est) : far;
+        const cands = new Set([...far.slice(0, 10), ...near.slice(0, 14)].map((x) => x.c));
+        const inPrev = i >= 2 ? lastEdge(legs[i - 2]) : -1, inPrev2 = i >= 2 ? lastEdge2(legs[i - 2]) : -1;
+        const trial = legs.slice();
+        for (const c of cands) {
+          const a = route(prev, c, 0, inPrev, inPrev2), b = route(c, next, 0, lastEdge(a), lastEdge2(a));
           if (!a || !b) continue;
-          // a point that makes the runner turn back at the next point is a last resort
-          const backAtNext = outNext != null && b.edges.length && turnCos(next, lastEdge(b), outNext) < REVERSE_COS;
-          const e = Math.abs(L - oldLen + a.len + b.len - D) + (backAtNext ? 400 : 0);
+          trial[i - 1] = a; trial[i] = b;
+          const e = loopScore(L - oldLen + a.len + b.len, countTurns(trial), D, tol);
           if (!best || e < best.e) best = { i, c, a, b, e };
         }
         await maybeYield();
         if (my !== runId) return false;
       }
-      if (!best || best.e >= Math.abs(err) - 1) break;
+      if (!best || best.e >= cur0 - 1) break;
       waypoints[best.i] = best.c; legs[best.i - 1] = legInfo(best.a); legs[best.i] = legInfo(best.b);
       afterChange(false);
     }
@@ -744,7 +754,7 @@ function rerouteAround(i) {
 // (Re)route leg li, entering it the way the previous leg arrives.
 function routeLeg(li) {
   const n = waypoints.length;
-  const r = route(waypoints[li], waypoints[(li + 1) % n], 0, li > 0 ? lastEdge(legs[li - 1]) : -1);
+  const r = route(waypoints[li], waypoints[(li + 1) % n], 0, li > 0 ? lastEdge(legs[li - 1]) : -1, li > 0 ? lastEdge2(legs[li - 1]) : -1);
   if (r) legs[li] = legInfo(r);
 }
 // If leg li now starts by doubling back on the leg before it, reroute it.
