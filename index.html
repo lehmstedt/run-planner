@@ -91,7 +91,7 @@ header p { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1
 input[type=range] { width: 100%; accent-color: var(--accent); }
 .scale-ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-top: -4px; }
 
-.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.actions { display: grid; gap: 8px; }
 .btn { font: 600 14px var(--f-body); padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--ground); color: var(--ink); cursor: pointer; }
 .btn:hover:not(:disabled) { border-color: var(--ink-2); }
 .btn:disabled { opacity: .45; cursor: default; }
@@ -226,7 +226,6 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
 
     <div class="actions">
       <button class="btn primary" id="gen">New loop</button>
-      <button class="btn" id="another" disabled>Try another</button>
     </div>
 
     <section class="stats more" aria-live="polite">
@@ -314,7 +313,7 @@ let homeLabel = "";
 let waypoints = [];      // node indices, first = home, loop returns to home
 let pinned = [];         // per waypoint: true when the runner placed or moved it (auto-fit leaves it alone)
 let legs = [];           // per leg {nodes, edges, len, catLen}
-let candidates = [], candIdx = 0;
+let candidates = [], candIdx = 0, candKey = ""; // ranked loops of the last search, and what they were made for
 let undoStack = [];
 const ui = {};
 const $ = (id) => document.getElementById(id);
@@ -572,7 +571,7 @@ async function generate() {
   bumpRun();
   const D = +ui.dist.value * 1000;
   setStatus("Finding loops…");
-  ui.gen.disabled = true; ui.another.disabled = true;
+  ui.gen.disabled = true;
   await frame();
   const nVia = D < 6000 ? 3 : D < 14000 ? 4 : D < 30000 ? 5 : 6;
   const myGen = ++genId;
@@ -586,7 +585,7 @@ async function generate() {
   }
   list.sort((a, b) => a.score - b.score);
   if (genId !== myGen) return;
-  candidates = list; candIdx = 0;
+  candidates = list; candIdx = 0; candKey = searchKey();
   ui.gen.disabled = false;
   if (!list.length) { setStatus("No loop found here. Try another distance or move the start."); return; }
   pushUndo();
@@ -594,11 +593,19 @@ async function generate() {
   clearStatus();
 }
 let genId = 0;
+// "New loop": the next best loop of the last search not shown yet (instant); a fresh search once
+// they have all been shown, or when the start, distance or path preference changed since.
+const searchKey = () => [home, ui.dist.value, ui.pref.value].join("/");
+async function nextLoop() {
+  if (candIdx + 1 >= candidates.length || candKey !== searchKey()) return generate();
+  pushUndo(); candIdx++;
+  ui.gen.disabled = true;
+  try { await applyCandidate(candIdx, true); } finally { ui.gen.disabled = false; }
+}
 async function applyCandidate(i, fit) {
   const c = candidates[i];
   bumpRun();
   waypoints = c.wps.slice(); legs = c.legs.slice(); pinned = waypoints.map(() => false);
-  ui.another.disabled = candidates.length < 2;
   afterChange(fit);
   if (!c.tuned) {
     await tuneDistance();
@@ -1440,7 +1447,7 @@ async function openSaved(it) {
   save({ dist: +ui.dist.value, pref: +ui.pref.value, home: [G.nx[home], G.ny[home]], homeLabel });
   waypoints = wps; legs = ls;
   pinned = wps.map((_, i) => i > 0 && !!(it.pinned && it.pinned[i]));
-  candidates = []; ui.another.disabled = true;
+  candidates = [];
   activeSaved = it.id; renderSaved();
   afterChange(true);
   setStatus(`Opened “${it.name || "loop"}”`, null, null, 2000);
@@ -1475,7 +1482,7 @@ function setDistLabel() {
   for (const b of ui.presets.children) b.setAttribute("aria-pressed", String(+b.dataset.v === v));
 }
 function wire() {
-  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), another: $("another"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
+  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), kml: $("kml"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit"),
     saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note") });
@@ -1492,8 +1499,7 @@ function wire() {
   $("dist-minus").onclick = () => { ui.dist.value = Math.max(2, Math.round((+ui.dist.value - 0.5) * 2) / 2); onDist(false); };
   $("dist-plus").onclick = () => { ui.dist.value = Math.min(45, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
   ui.pref.addEventListener("change", () => { setPref(+ui.pref.value / 100); save({ pref: +ui.pref.value }); generate(); });
-  ui.gen.onclick = generate;
-  ui.another.onclick = async () => { if (candidates.length < 2) return; pushUndo(); candIdx = (candIdx + 1) % candidates.length; setStatus(`Loop ${candIdx + 1} of ${candidates.length}`); await applyCandidate(candIdx, true); setStatus(`Loop ${candIdx + 1} of ${candidates.length}`, null, null, 1500); };
+  ui.gen.onclick = nextLoop;
   ui.undo.onclick = undo;
   ui.fitDist.onclick = matchDistance;
   ui.autoFit.addEventListener("change", () => { save({ autoFit: ui.autoFit.checked }); if (ui.autoFit.checked) autoFit(); });
