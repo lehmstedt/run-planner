@@ -16,7 +16,7 @@ import numpy as np
 SRC, OUT = sys.argv[1], sys.argv[2]
 d = json.load(open(SRC, encoding="utf-8"))
 
-kx = math.cos(45.46 * math.pi / 180) * 111320 / d["scale"]
+kx = math.cos(d.get("lat0", 45.46) * math.pi / 180) * 111320 / d["scale"]
 ky = 110540 / d["scale"]
 
 # Everything stays in the JSON's integer units (1e-5 degree, ~1 m) and is delta-coded, which

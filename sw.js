@@ -1,7 +1,7 @@
 // Service worker: makes the app installable and lets it start offline.
 // The page is fetched fresh when online (falls back to the cached copy); the map file is
-// served from the cache. Bump VERSION whenever map-data.bin changes so phones fetch the new map.
-const VERSION = "v2";
+// served from the cache. Other areas' maps (map-data-*.bin) are cached the first time they load. Bump VERSION whenever a map file changes so phones fetch the new map.
+const VERSION = "v3";
 const CACHE = "run-loops-" + VERSION, FONTS = "run-loops-fonts";
 const SHELL = ["./", "manifest.webmanifest", "map-data.bin", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png", "icons/apple-touch-icon.png"];
 

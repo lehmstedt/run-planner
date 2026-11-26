@@ -1,8 +1,10 @@
-# Verdun Run Loops
+# Run Loops
 
 A running-route planner that runs entirely offline, in a Claude artifact or as an app installed on your phone.
 
-- Pick a distance and it builds a loop from home (default: 5e Avenue, Verdun, H4G 2Z5).
+Two areas, picked under "Area" in the side panel: **Verdun** (Montréal; start 5e Avenue, H4G 2Z5) and **Saint-Berthevin** (Mayenne, France; start Avenue Saint-Exupéry, 53940, with Laval and the countryside around). Each area keeps its own start, settings and current loop; saved loops are listed in the area they were made in.
+
+- Pick a distance and it builds a loop from home.
 - Routing favours cycle paths and park trails over car roads (the "Path preference" slider sets how strongly).
 - Loops have as few corners as possible: the router will run about 300 m further to avoid a right-angle turn, loops are ranked by corners per km, half the candidate loops use one via point less, and free via points slide to where the route runs straight through them (without leaving the target distance). Direction changes are measured across short connectors, so crossing a street to carry on the same way isn't a corner, while turning back (a hairpin, or crossing to the other sidewalk to come back the way you came) costs a lot, also where one leg hands over to the next. The loop summary counts corners and turn-backs.
 - Fewer interruptions: loops avoid traffic lights (junctions and signalised crossings) and, less strongly, stop signs. "Avoid traffic lights" sets how much further the router will run to skip one (up to 600 m per light at full, a fifth of that per stop sign; 70% by default). Lights are only charged where you cross or run through the junction: running past it on a sidewalk is free. The loop summary counts traffic lights and stop signs, and the lights on the loop show as red dots when zoomed in. Skipping lights often means a few more corners through quiet side streets; slide it down to trade back.
@@ -24,7 +26,7 @@ It's a static site (no build step), published with GitHub Pages by `.github/work
 2. Every push to `main` redeploys (or run the workflow by hand from the Actions tab).
 3. The site is served at `https://<owner>.github.io/run-planner/`.
 
-Published: `index.html`, `map-data.bin`, `manifest.webmanifest`, `sw.js` and `icons/`; `scripts/` and `map-data.json` stay in the repo.
+Published: `index.html`, `map-data.bin`, `map-data-*.bin`, `manifest.webmanifest`, `sw.js` and `icons/`; `scripts/` and `map-data.json` stay in the repo.
 
 ## Files
 
@@ -35,13 +37,17 @@ Published: `index.html`, `map-data.bin`, `manifest.webmanifest`, `sw.js` and `ic
 - `scripts/` – rebuilds the map from Overture Maps (OpenStreetMap-based) GeoParquet on AWS Open Data:
 
 ```
-pip install pyarrow requests shapely
-python3 scripts/fetch_segments.py /tmp/osm/segments.parquet
-python3 scripts/fetch_context.py /tmp/osm
-python3 scripts/build_map.py /tmp/osm map-data.json
-python3 scripts/add_signals.py /tmp/osm map-data.json
-python3 scripts/pack_map.py map-data.json map-data.bin
+pip install pyarrow requests shapely numpy
+cd scripts
+export RUN_REGION=verdun   # or st-berthevin (areas are listed in scripts/regions.py)
+python3 fetch_segments.py /tmp/osm/segments.parquet
+python3 fetch_context.py /tmp/osm
+python3 build_map.py /tmp/osm ../map-data.json 2026-11-18.0   # Saint-Berthevin: ../map-data-st-berthevin.json
+python3 add_signals.py /tmp/osm ../map-data.json
+python3 pack_map.py ../map-data.json ../map-data.bin
 ```
+
+To add an area: add it to `scripts/regions.py` (bounding box, latitude, where to find the start address) and to `AREAS` in `index.html`, then build its `map-data-<id>.bin`.
 
 After changing `map-data.bin`, bump `VERSION` in `sw.js` so installed apps download the new map.
 

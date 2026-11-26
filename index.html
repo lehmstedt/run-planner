@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Verdun Run Loops</title>
+<title>Run Loops</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" id="font-css" media="print" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
@@ -203,9 +203,9 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
   <aside class="rail collapsed" id="rail" aria-label="Route controls">
     <button class="sheet-handle" id="sheet-toggle" type="button" aria-expanded="false" aria-controls="rail"><i></i><span id="sheet-label">More options</span></button>
     <header class="more">
-      <h1>Verdun Run Loops</h1>
+      <h1>Run Loops</h1>
       <button class="btn small install" id="install" hidden>Install app</button>
-      <p>Loops from home that stick to bike paths and park trails. Works offline from a map of Montréal from Lachine to the Olympic Stadium, up to marathon distance.</p>
+      <p>Loops from home that stick to bike paths and park trails. Works offline from a map of <span id="area-blurb">Montréal from Lachine to the Olympic Stadium</span>, up to marathon distance.</p>
     </header>
 
     <section class="block" aria-labelledby="dist-label">
@@ -273,6 +273,11 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
       <p class="saved-note" id="saved-note">No saved loops yet.</p>
     </section>
 
+    <section class="block more" aria-labelledby="area-label">
+      <div class="label" id="area-label">Area</div>
+      <div class="presets" id="areas"></div>
+    </section>
+
     <section class="home more">
       <div><span>Start and finish</span><b id="home-label">5e Avenue, H4G 2Z5</b></div>
       <button class="btn small" id="move-home">Move</button>
@@ -284,7 +289,7 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
   <main class="mapwrap">
     <canvas id="map" aria-label="Map of the route"></canvas>
     <div class="distpill" id="distpill" hidden aria-live="polite"><b id="pill-km">–</b><span id="pill-delta"></span></div>
-    <div class="status" id="status">Loading the Verdun map…</div>
+    <div class="status" id="status">Loading the map…</div>
     <div class="mapkey" aria-hidden="true">
       <span><i style="background:var(--route)"></i>Your loop</span>
       <span><i style="background:var(--cycle)"></i>Cycle path</span>
@@ -312,7 +317,16 @@ const GROUPS = [
   { name: "Along busy roads", cats: [2, 5, 6, 7], color: "--busy" },
 ];
 const PRESETS = [5, 8, 10, 15, 21.1, 30, 42.2];
-const LS = "verdun-run-loops-v1";
+// Areas with a map. Each keeps its own settings, start and current loop; saved loops are listed in their area.
+// map-data*.bin is made by scripts/ (RUN_REGION=<id>); the page also tries <file>.wasm, the same bytes,
+// for hosts that only serve known file types (Claude artifacts).
+const AREAS = {
+  "verdun": { name: "Verdun", file: "map-data.bin", ls: "verdun-run-loops-v1", blurb: "Montréal from Lachine to the Olympic Stadium" },
+  "st-berthevin": { name: "Saint-Berthevin", file: "map-data-st-berthevin.bin", ls: "run-loops-st-berthevin-v1", blurb: "Saint-Berthevin, Laval and the countryside around them" },
+};
+const LS_AREA = "run-loops-area";
+let AREA = (() => { try { const a = localStorage.getItem(LS_AREA); return AREAS[a] ? a : "verdun"; } catch { return "verdun"; } })();
+const LS = "verdun-run-loops-v1"; // Verdun's settings key (kept from before there were areas); also prefixes saved loops
 
 // ---------------------------------------------------------------- state
 let G = null;            // graph
@@ -327,8 +341,8 @@ const ui = {};
 const $ = (id) => document.getElementById(id);
 
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-function store() { try { return JSON.parse(localStorage.getItem(LS) || "{}"); } catch { return {}; } }
-function save(patch) { try { localStorage.setItem(LS, JSON.stringify(Object.assign(store(), patch))); } catch {} }
+function store() { try { return JSON.parse(localStorage.getItem(AREAS[AREA].ls) || "{}"); } catch { return {}; } }
+function save(patch) { try { localStorage.setItem(AREAS[AREA].ls, JSON.stringify(Object.assign(store(), patch))); } catch {} }
 
 // ---------------------------------------------------------------- graph
 // map-data.bin (made by scripts/pack_map.py): "RPL1", meta JSON, then typed arrays read in place.
@@ -1382,13 +1396,13 @@ async function saveFile(fname, data, mime, label) {
 }
 async function exportGpx() {
   const pts = routeLonLat().map(([lon, lat]) => `<trkpt lat="${lat.toFixed(6)}" lon="${lon.toFixed(6)}"/>`);
-  const km = routeKm(), name = `Verdun loop ${km} km`;
-  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Verdun Run Loops" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name></metadata>\n<trk><name>${name}</name><type>running</type><trkseg>\n${pts.join("\n")}\n</trkseg></trk>\n</gpx>\n`;
-  await saveFile(`verdun-loop-${km}km.gpx`, gpx, "application/gpx+xml", "GPX");
+  const km = routeKm(), name = `${AREAS[AREA].name} loop ${km} km`;
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Run Loops" xmlns="http://www.topografix.com/GPX/1/1">\n<metadata><name>${name}</name></metadata>\n<trk><name>${name}</name><type>running</type><trkseg>\n${pts.join("\n")}\n</trkseg></trk>\n</gpx>\n`;
+  await saveFile(`${AREA}-loop-${km}km.gpx`, gpx, "application/gpx+xml", "GPX");
 }
 // KML for Google My Maps (Create map → Import). Keeps line colour/width, adds a start pin and km markers.
 async function exportKml() {
-  const ll = routeLonLat(), km = routeKm(), name = `Verdun loop ${km} km`;
+  const ll = routeLonLat(), km = routeKm(), name = `${AREAS[AREA].name} loop ${km} km`;
   const c = (p) => `${p[0].toFixed(6)},${p[1].toFixed(6)},0`;
   const marks = [];
   for (let m = 1000, k = 0; m < routeCum[routeCum.length - 1] - 200; m += 1000) {
@@ -1413,7 +1427,7 @@ ${marks.join("\n")}
 </Document>
 </kml>
 `;
-  if (await saveFile(`verdun-loop-${km}km.kml`, kml, "application/vnd.google-earth.kml+xml", "KML"))
+  if (await saveFile(`${AREA}-loop-${km}km.kml`, kml, "application/vnd.google-earth.kml+xml", "KML"))
     setStatus("KML saved — in My Maps: Import, then pick this file", "Open My Maps", () => window.open("https://www.google.com/maps/d/", "_blank", "noopener"), 8000);
 }
 
@@ -1500,7 +1514,7 @@ async function initSaved() {
 }
 function setSavedNote(t) { ui.savedNote.textContent = t; ui.savedNote.hidden = !t; }
 function renderSaved() {
-  const items = [...savedCloud, ...savedLocal].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const items = [...savedCloud, ...savedLocal].filter((it) => (it.area || "verdun") === AREA).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   ui.savedList.replaceChildren();
   for (const it of items) {
     const li = document.createElement("li");
@@ -1522,7 +1536,7 @@ async function saveCurrent(ev) {
   if (!G || !legs.length) return;
   const km = summarize(legs).len / 1000;
   const name = ui.saveName.value.trim() || `${km.toFixed(1)} km loop`;
-  const it = { name, km: +km.toFixed(2), target: +ui.dist.value, pref: +ui.pref.value, lights: +ui.lights.value, homeLabel,
+  const it = { name, km: +km.toFixed(2), target: +ui.dist.value, pref: +ui.pref.value, lights: +ui.lights.value, homeLabel, area: AREA,
     wps: waypoints.map((k) => toLL(G.nx[k], G.ny[k])), pinned: pinned.map(Boolean), createdAt: Date.now() };
   ui.saveBtn.disabled = true;
   let where = null;
@@ -1671,17 +1685,48 @@ function setupApp() {
 let DATA = null;
 async function boot() {
   setupApp(); wire(); readColors();
+  renderAreas();
+  await loadArea(AREA);
+}
+function renderAreas() {
+  const box = $("areas"); box.replaceChildren();
+  for (const [id, a] of Object.entries(AREAS)) {
+    const b = document.createElement("button"); b.className = "chip"; b.type = "button"; b.textContent = a.name;
+    b.setAttribute("aria-pressed", String(id === AREA));
+    b.onclick = () => { if (id !== AREA && !loadingArea) loadArea(id); };
+    box.appendChild(b);
+  }
+  $("area-blurb").textContent = AREAS[AREA].blurb;
+}
+// Load an area's map and its own settings, start and last loop (the first area at startup, then on a switch).
+let loadingArea = false, savedStarted = false;
+async function loadArea(id) {
+  loadingArea = true;
+  try { await loadAreaNow(id); } finally { loadingArea = false; }
+}
+async function loadAreaNow(id) {
+  const first = !G;
+  AREA = id; try { localStorage.setItem(LS_AREA, id); } catch {}
+  renderAreas();
+  // forget everything that belongs to the previous map
+  bumpRun(); genId++; tuning = false;
+  G = null; DATA = null; layers = null; home = null; waypoints = []; legs = []; pinned = []; candidates = []; candIdx = 0; candKey = "";
+  undoStack = []; routeSigs = []; activeSaved = null;
+  ui.undo.disabled = ui.fitDist.disabled = ui.gpx.disabled = ui.kml.disabled = ui.gmaps.disabled = ui.saveBtn.disabled = true;
+  gScore = penW = nwD = null;
+  if (!first) { buildRouteGeometry(); clearTiles(); ui.pill.hidden = true; ui.turns.textContent = ""; draw(); }
+  setStatus(`Loading the ${AREAS[id].name} map…`);
   const st = store();
-  if (st.dist) ui.dist.value = st.dist;
-  if (st.pref != null) ui.pref.value = st.pref;
-  if (st.lights != null) ui.lights.value = st.lights;
-  if (st.autoFit === false) ui.autoFit.checked = false;
+  ui.dist.value = st.dist || 8;
+  ui.pref.value = st.pref != null ? st.pref : 80;
+  ui.lights.value = st.lights != null ? st.lights : 70;
+  ui.autoFit.checked = st.autoFit !== false;
   setDistLabel(); setPref(+ui.pref.value / 100); setLights(+ui.lights.value / 100);
   resize();
   try {
-    // map-data.bin.wasm: the same bytes, for hosts that only serve known file types (Claude artifacts)
-    let res = await fetch("map-data.bin");
-    if (!res.ok) res = await fetch("map-data.bin.wasm");
+    const file = AREAS[id].file;
+    let res = await fetch(file);
+    if (!res.ok) res = await fetch(file + ".wasm");
     if (!res.ok) throw new Error(res.status);
     const total = +res.headers.get("content-length") || 0, parts = [];
     let got = 0;
@@ -1692,11 +1737,12 @@ async function boot() {
     let buf = new Uint8Array(await new Blob(parts).arrayBuffer());
     if (buf[0] === 0x1f && buf[1] === 0x8b) // gzipped file (unless the server already decoded it)
       buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+    if (AREA !== id) return; // switched again while loading
     const map = parseMap(buf);
     DATA = map.meta;
     G = buildGraph(map);
   } catch (e) { setStatus("The map file didn't load. Reload the page to try again."); return; }
-  initSaved();
+  if (!savedStarted) { savedStarted = true; initSaved(); } else renderSaved();
   layers = buildLayers();
   const h = DATA.home;
   const hx = (h.lon - DATA.origin[0]) * DATA.scale * G.kx, hy = -(h.lat - DATA.origin[1]) * DATA.scale * G.ky;

@@ -1,6 +1,6 @@
 {
   "id": "./",
-  "name": "Verdun Run Loops",
+  "name": "Run Loops",
   "short_name": "Run Loops",
   "description": "Running loops from home that stick to bike paths and park trails. Works offline.",
   "start_url": "./",

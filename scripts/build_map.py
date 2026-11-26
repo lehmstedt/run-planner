@@ -9,12 +9,15 @@ import sys, json, math, collections
 import pyarrow.parquet as pq
 import shapely
 from shapely.geometry import box
+import regions
 
 SRC, OUT = sys.argv[1], sys.argv[2]
-BBOX = (-73.74, 45.36, -73.42, 45.56)
+BBOX = regions.R["bbox"]
+LATM = regions.R["lat0"]  # latitude for metres per degree
 LON0, LAT0 = BBOX[0], BBOX[1]
 Q = 1e5  # 1e-5 degree units (~1 m)
-HOME_POSTCODE = "H4G2Z5"
+HOME = regions.R["home"]
+RELEASE = (sys.argv[3] if len(sys.argv) > 3 else "2026-11-18.0")  # Overture release the parquet came from
 
 # Category ids, shared with the page.
 CYCLE, TRAIL, SIDEWALK, CROSSING, QUIET, TERTIARY, SECONDARY, PRIMARY, STEPS = range(9)
@@ -69,7 +72,7 @@ def category(r):
 
 
 def mlen(a, b):
-    kx = 111320 * math.cos(math.radians(45.46))
+    kx = 111320 * math.cos(math.radians(LATM))
     return math.hypot((b[0] - a[0]) * kx, (b[1] - a[1]) * 110540)
 
 
@@ -102,7 +105,7 @@ segs = pq.read_table(f"{SRC}/segments.parquet").to_pylist()
 
 # Many sidewalks are mapped as plain footways. A footway/path that runs alongside a street
 # (most of its length within 18 m of one) is treated as that street for routing, and drawn as a sidewalk.
-MX, MY = 111320 * math.cos(math.radians(45.46)), 110540
+MX, MY = 111320 * math.cos(math.radians(LATM)), 110540
 ROAD_CAT = {"residential": QUIET, "unclassified": QUIET, "living_street": QUIET, "service": QUIET,
             "tertiary": TERTIARY, "secondary": SECONDARY, "primary": PRIMARY, "motorway": PRIMARY, "trunk": PRIMARY}
 
@@ -173,13 +176,15 @@ for r in segs:
 print("raw nodes", len(node_xy), "edges", len(edges), "dropped", dict(dropped))
 
 # ---------- home ----------
+norm = lambda t: (t or "").replace(" ", "").upper()
 addr = [r for r in pq.read_table(f"{SRC}/address.parquet").to_pylist()
-        if (r["postcode"] or "").replace(" ", "").upper() == HOME_POSTCODE]
+        if norm(r["postcode"]) == norm(HOME["postcode"]) and ("street" not in HOME or norm(r["street"]) == norm(HOME["street"]))]
 hx = sum(shapely.from_wkb(r["geometry"]).x for r in addr) / len(addr)
 hy = sum(shapely.from_wkb(r["geometry"]).y for r in addr) / len(addr)
 street = collections.Counter(r["street"] for r in addr).most_common(1)[0][0]
 nums = sorted(int("".join(ch for ch in r["number"] if ch.isdigit())) for r in addr if any(ch.isdigit() for ch in r["number"]))
-home = {"lon": round(hx, 6), "lat": round(hy, 6), "label": f"{nums[0]}–{nums[-1]} {street}, H4G 2Z5"}
+pc = addr[0]["postcode"]
+home = {"lon": round(hx, 6), "lat": round(hy, 6), "label": f"{nums[0]}–{nums[-1]} {street}, {pc}" if nums else f"{street}, {pc}"}
 print("home", home)
 
 # ---------- largest component ----------
@@ -260,7 +265,7 @@ nodes_out = []
 for n in used:
     nodes_out += list(node_xy[n])
 edges_out, geom_out = [], []
-kx = math.cos(math.radians(45.46)) * 1.1132  # metres per unit (x)
+kx = math.cos(math.radians(LATM)) * 1.1132  # metres per unit (x)
 ky = 1.1054
 for e in edges:
     pts = dp(e[4])
@@ -321,8 +326,8 @@ for r in pq.read_table(f"{SRC}/land_use.parquet").to_pylist():
 print("water polys", len(water), "park polys", len(parks))
 
 data = {
-    "source": "Overture Maps Foundation (includes OpenStreetMap data, ODbL) release 2026-11-18.0",
-    "origin": [LON0, LAT0], "scale": Q, "bbox": BBOX,
+    "source": "Overture Maps Foundation (includes OpenStreetMap data, ODbL) release " + RELEASE,
+    "origin": [LON0, LAT0], "scale": Q, "bbox": BBOX, "lat0": LATM,
     "home": home,
     "cats": CAT_NAMES,
     "names": names,

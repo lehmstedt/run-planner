@@ -23,7 +23,7 @@ d = json.load(open(MAP, encoding="utf-8"))
 LON0, LAT0 = d["origin"]
 Q = d["scale"]
 xmin, ymin, xmax, ymax = d["bbox"]
-MX, MY = 111320 * math.cos(math.radians(45.46)), 110540
+MX, MY = 111320 * math.cos(math.radians(d.get("lat0", 45.46))), 110540
 
 pts = {LIGHT: [], STOP: []}
 for r in pq.read_table(f"{SRC}/infrastructure.parquet", columns=["subtype", "class", "source_tags", "geometry"]).to_pylist():
