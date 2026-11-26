@@ -225,6 +225,12 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
       <div class="scale-ends"><span>Shortest way</span><span>Cycle paths first</span></div>
     </section>
 
+    <section class="block more" aria-labelledby="lights-label">
+      <div class="label" id="lights-label">Avoid traffic lights</div>
+      <input type="range" id="lights" min="0" max="100" step="5" value="70" aria-label="How strongly to avoid traffic lights and stop signs">
+      <div class="scale-ends"><span>Don't mind</span><span>Fewest stops</span></div>
+    </section>
+
     <div class="actions">
       <button class="btn primary" id="gen">New loop</button>
     </div>
@@ -272,7 +278,7 @@ button, input, label { touch-action: manipulation; -webkit-tap-highlight-color: 
       <button class="btn small" id="move-home">Move</button>
     </section>
 
-    <div class="foot more">Map data © OpenStreetMap contributors (ODbL), via Overture Maps release 2026-11-18. Busy roads are avoided, not forbidden; check crossings on the ground.</div>
+    <div class="foot more">Map data © OpenStreetMap contributors (ODbL), via Overture Maps release 2026-11-18. Busy roads and traffic lights are avoided, not forbidden; check crossings on the ground.</div>
   </aside>
 
   <main class="mapwrap">
@@ -386,8 +392,40 @@ function buildGraph({ meta, a }) {
     }
     return { poly, ring, pts, count: poly.length - 1 };
   };
-  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, dA, dB, goff, gpts, grid, CELL, gy0, names: meta.names,
+  const sig = buildSignals(a, n, nx, ny, kx, ky, grid, CELL, gy0);
+  return { n, m, nx, ny, ea, eb, ec, side, en, el, off: deg, adj, dA, dB, goff, gpts, grid, CELL, gy0, names: meta.names, ...sig,
     water: polys(a.waterPoly, a.waterRing, a.waterD), parks: polys(a.parkPoly, a.parkRing, a.parkD), kx, ky };
+}
+
+// Traffic lights and stop signs (scripts/add_signals.py): groups of points, one group per junction or crossing.
+// Every node within reach of a group's points belongs to it (sigOf[node] = group, -1 for none); a light wins over a stop sign.
+// OSM puts most signals on the approaches, a few metres before the junction, hence the reach.
+const SIG_REACH = [0, 20, 15], SIG_LIGHT = 1, SIG_STOP = 2;
+function buildSignals(a, n, nx, ny, kx, ky, grid, CELL, gy0) {
+  const sigOf = new Int32Array(n).fill(-1), sigDist = new Float32Array(n).fill(Infinity);
+  if (!a.sigOff) return { sigOf, sigK: new Uint8Array(0), sigX: new Float32Array(0), sigY: new Float32Array(0) };
+  const off = a.sigOff, d = a.sigD, ng = a.sigK.length, sigX = new Float32Array(ng), sigY = new Float32Array(ng);
+  let x = 0, y = 0;
+  for (let g = 0; g < ng; g++) {
+    const k = a.sigK[g], R = SIG_REACH[k];
+    let sx = 0, sy = 0;
+    for (let p = off[g]; p < off[g + 1]; p++) {
+      x += d[2 * p]; y += d[2 * p + 1];
+      const px = x * kx, py = -y * ky; sx += px; sy += py;
+      const cx = Math.floor(px / CELL), cy = Math.floor((py - gy0) / CELL);
+      for (let i = cx - 1; i <= cx + 1; i++) for (let j = cy - 1; j <= cy + 1; j++) {
+        const c = grid.get(i * 100000 + j); if (!c) continue;
+        for (const v of c) {
+          const dd = Math.hypot(nx[v] - px, ny[v] - py);
+          if (dd > R) continue;
+          const cur = sigOf[v];
+          if (cur < 0 || (a.sigK[cur] === k ? dd < sigDist[v] : k === SIG_LIGHT)) { sigOf[v] = g; sigDist[v] = dd; }
+        }
+      }
+    }
+    const cnt = off[g + 1] - off[g]; sigX[g] = sx / cnt; sigY[g] = sy / cnt;
+  }
+  return { sigOf, sigK: a.sigK, sigX, sigY };
 }
 
 function nearestNode(x, y, filter) {
@@ -415,6 +453,20 @@ const friendly = (k) => { if (!junction(k)) return false; for (let p = G.off[k];
 // ---------------------------------------------------------------- routing (A*)
 let costF = new Float32Array(9);
 function setPref(p) { for (let c = 0; c < 9; c++) costF[c] = 1 + p * (FULL_COST[c] - 1); }
+// Interruptions, in metres of extra running: at full "Avoid traffic lights" the router runs up to
+// LIGHT_MAX further to skip a junction or crossing with lights, a fifth of that for a stop sign.
+const LIGHT_MAX = 600, STOP_SHARE = 0.2;
+const sigCost = new Float32Array(3);
+function setLights(p) { sigCost[SIG_LIGHT] = p * LIGHT_MAX; sigCost[SIG_STOP] = p * LIGHT_MAX * STOP_SHARE; }
+// Signal group charged when the runner goes from u to v along e (arriving at u on inE), or -1.
+// A group is charged once when the route enters it: walking on through more of its nodes is free.
+// Sidewalks never charge (running past lights on the sidewalk doesn't stop you); the crosswalk does.
+function sigAt(u, v, e, inE) {
+  const g = G.sigOf[v];
+  if (g < 0 || G.side[e]) return -1;
+  if (inE >= 0 && !G.side[inE] && G.sigOf[u] === g) return -1;
+  return g;
+}
 let gScore, cameFrom, closedStamp, openStamp, stamp = 0;
 class Heap { // binary min-heap on typed arrays; lastKey = key of the last pop
   constructor() { this.k = new Float64Array(4096); this.v = new Int32Array(4096); this.n = 0; this.lastKey = 0; }
@@ -470,7 +522,7 @@ const routeHeap = new Heap();
 // startPrev: the edge before it.
 function route(s, t, penalty, startEdge = -1, startPrev = -1) {
   if (s === t) return { nodes: [s], edges: [], len: 0 };
-  const { nx, ny, ea, eb, ec, el, off, adj } = G;
+  const { nx, ny, ea, eb, ec, el, off, adj, sigOf, sigK } = G;
   if (!gScore) { gScore = new Float64Array(G.n); cameFrom = new Int32Array(G.n); closedStamp = new Int32Array(G.n); openStamp = new Int32Array(G.n); }
   stamp++;
   let minF = Infinity; for (let c = 0; c < 9; c++) minF = Math.min(minF, costF[c]);
@@ -493,6 +545,7 @@ function route(s, t, penalty, startEdge = -1, startPrev = -1) {
       let w = el[e] * costF[ec[e]];
       if (penalty && penS[e] === penalty) w *= penW[e];
       if (inE >= 0) { const c = cornerCos(u, inE, e, pe); if (c < FREE_COS) w += turnCost(c); }
+      if (sigOf[v] >= 0) { const sg = sigAt(u, v, e, inE); if (sg >= 0) w += sigCost[sigK[sg]]; }
       const g = gu + w + 0.5;
       if (openStamp[v] !== stamp || g < gScore[v]) { gScore[v] = g; openStamp[v] = stamp; cameFrom[v] = e; heap.push(g + h(v), v); }
     }
@@ -528,15 +581,21 @@ function summarize(ls) {
 }
 // Corners (direction changes over ~50°, at junctions, measured across short connectors) and turn-backs
 // (hairpins) along the loop, including where one leg hands over to the next.
+// Also the traffic lights and stop signs the loop goes through (sigs: their groups, in order).
 function countTurns(ls) {
-  let turns = 0, backs = 0, prev = -1, prev2 = -1;
+  let turns = 0, backs = 0, lights = 0, stops = 0, prev = -1, prev2 = -1;
+  const sigs = [];
   for (const l of ls) for (let i = 0; i < l.edges.length; i++) {
-    const e = l.edges[i], c = prev >= 0 ? cornerCos(l.nodes[i], prev, e, prev2) : 2;
+    const e = l.edges[i], u = l.nodes[i], c = prev >= 0 ? cornerCos(u, prev, e, prev2) : 2;
     if (c < REVERSE_COS) backs++; else if (c < CORNER_COS) turns++;
+    const v = l.nodes[i + 1];
+    if (G.sigOf[v] >= 0) { const g = sigAt(u, v, e, prev); if (g >= 0) { sigs.push(g); if (G.sigK[g] === SIG_LIGHT) lights++; else stops++; } }
     prev2 = prev; prev = e;
   }
-  return { turns, backs };
+  return { turns, backs, lights, stops, sigs };
 }
+// Interruptions in metres of running, the way the router weighs them (for ranking loops).
+const sigMetres = (t) => t.lights * sigCost[SIG_LIGHT] + t.stops * sigCost[SIG_STOP];
 // Weight of corners per km when ranking loops.
 const TURN_SCORE = 1.5;
 async function makeCandidate(theta, D, nVia) {
@@ -565,7 +624,8 @@ async function makeCandidate(theta, D, nVia) {
   const busy = (best.catLen[2] + best.catLen[5] + best.catLen[6] + best.catLen[7]) / best.len;
   const path = (best.catLen[0] + best.catLen[1]) / best.len;
   const perKm = 1000 / best.len;
-  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5 + best.turns * perKm * TURN_SCORE + best.backs * 0.5;
+  best.score = best.err * 4 + busy * 1.2 - path * 0.6 + (best.overlap / best.len) * 1.5 + best.turns * perKm * TURN_SCORE + best.backs * 0.5
+    + (sigMetres(best) / TURN_M) * perKm * TURN_SCORE;
   return best;
 }
 async function generate() {
@@ -596,8 +656,8 @@ async function generate() {
 }
 let genId = 0;
 // "New loop": the next best loop of the last search not shown yet (instant); a fresh search once
-// they have all been shown, or when the start, distance or path preference changed since.
-const searchKey = () => [home, ui.dist.value, ui.pref.value].join("/");
+// they have all been shown, or when the start, distance, path preference or traffic-light setting changed since.
+const searchKey = () => [home, ui.dist.value, ui.pref.value, ui.lights.value].join("/");
 async function nextLoop() {
   if (candIdx + 1 >= candidates.length || candKey !== searchKey()) return generate();
   pushUndo(); candIdx++;
@@ -649,7 +709,7 @@ let tuning = false, runId = 0;
 const bumpRun = () => ++runId;
 function loopScore(len, t, D, tol) {
   const miss = Math.abs(len - D) - tol;
-  return (miss > 0 ? 4 * miss + OFF_TARGET : 0) + t.turns * CORNER_W + t.backs * 400;
+  return (miss > 0 ? 4 * miss + OFF_TARGET : 0) + t.turns * CORNER_W + t.backs * 400 + (sigMetres(t) / TURN_M) * CORNER_W;
 }
 async function tuneDistance(includePinned) {
   if (waypoints.length < 2) return false;
@@ -803,7 +863,7 @@ function afterChange(fit) {
 }
 
 // ---------------------------------------------------------------- route geometry
-let routePts = new Float32Array(0), routeCum = new Float32Array(0), legStart = [];
+let routePts = new Float32Array(0), routeCum = new Float32Array(0), legStart = [], routeSigs = [];
 function edgePoints(e, fromNode, out) {
   const P = G.gpts, g0 = G.goff[e], g1 = G.goff[e + 1];
   if (G.ea[e] === fromNode) { for (let k = g0; k < g1; k++) out.push(P[2 * k], P[2 * k + 1]); out.push(G.nx[G.eb[e]], G.ny[G.eb[e]]); }
@@ -836,7 +896,10 @@ function renderStats() {
   ui.pillKm.textContent = (s.len / 1000).toFixed(2) + " km";
   ui.pillDelta.textContent = ok ? `✓ ${(D / 1000).toFixed(1)} km` : `${dtxt} vs ${(D / 1000).toFixed(1)}`;
   ui.pill.dataset.state = ok ? "ok" : diff > 0 ? "over" : "under";
-  ui.turns.textContent = legs.length ? `${s.turns} corner${s.turns === 1 ? "" : "s"} · ${s.backs ? s.backs + " turn-back" + (s.backs === 1 ? "" : "s") : "no turn-backs"}` : "";
+  const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  ui.turns.textContent = legs.length ? [plural(s.turns, "corner", "corners"), s.backs ? plural(s.backs, "turn-back", "turn-backs") : "no turn-backs",
+    s.lights ? plural(s.lights, "traffic light", "traffic lights") : "no traffic lights", s.stops ? plural(s.stops, "stop sign", "stop signs") : "no stop signs"].join(" · ") : "";
+  routeSigs = s.sigs;
   ui.bar.innerHTML = ""; ui.legend.innerHTML = "";
   for (const g of GROUPS) {
     const v = g.cats.reduce((a, c) => a + s.catLen[c], 0), pct = s.len ? 100 * v / s.len : 0;
@@ -1129,6 +1192,15 @@ function drawRouteMarks() {
     const a = Math.atan2(dy, dx);
     ctx.save(); ctx.translate(x, y); ctx.rotate(a);
     ctx.beginPath(); ctx.moveTo(-2.5, -3); ctx.lineTo(1.5, 0); ctx.lineTo(-2.5, 3); ctx.stroke(); ctx.restore();
+  }
+  // traffic lights (red) and stop signs (small, dark) the loop goes through, when zoomed in enough
+  if (view.s > 0.2) for (const g of routeSigs) {
+    const [x, y] = toScreen(G.sigX[g], G.sigY[g]);
+    if (x < -10 || y < -10 || x > W + 10 || y > H + 10) continue;
+    const light = G.sigK[g] === SIG_LIGHT;
+    if (!light && view.s < 0.5) continue;
+    ctx.beginPath(); ctx.arc(x, y, light ? 5.5 : 4, 0, 7);
+    ctx.fillStyle = light ? "#e0362c" : colors["--ink-2"]; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = "#fff"; ctx.stroke();
   }
   // waypoints
   waypoints.forEach((k, idx) => {
@@ -1450,7 +1522,7 @@ async function saveCurrent(ev) {
   if (!G || !legs.length) return;
   const km = summarize(legs).len / 1000;
   const name = ui.saveName.value.trim() || `${km.toFixed(1)} km loop`;
-  const it = { name, km: +km.toFixed(2), target: +ui.dist.value, pref: +ui.pref.value, homeLabel,
+  const it = { name, km: +km.toFixed(2), target: +ui.dist.value, pref: +ui.pref.value, lights: +ui.lights.value, homeLabel,
     wps: waypoints.map((k) => toLL(G.nx[k], G.ny[k])), pinned: pinned.map(Boolean), createdAt: Date.now() };
   ui.saveBtn.disabled = true;
   let where = null;
@@ -1476,8 +1548,9 @@ async function openSaved(it) {
   pushUndo(); bumpRun(); tuning = false;
   if (it.target) { ui.dist.value = it.target; setDistLabel(); }
   if (it.pref != null && +ui.pref.value !== it.pref) { ui.pref.value = it.pref; setPref(it.pref / 100); }
+  if (it.lights != null && +ui.lights.value !== it.lights) { ui.lights.value = it.lights; setLights(it.lights / 100); }
   home = wps[0]; homeLabel = it.homeLabel || "Custom start"; updateHomeLabel();
-  save({ dist: +ui.dist.value, pref: +ui.pref.value, home: [G.nx[home], G.ny[home]], homeLabel });
+  save({ dist: +ui.dist.value, pref: +ui.pref.value, lights: +ui.lights.value, home: [G.nx[home], G.ny[home]], homeLabel });
   waypoints = wps; legs = ls;
   pinned = wps.map((_, i) => i > 0 && !!(it.pinned && it.pinned[i]));
   candidates = [];
@@ -1515,7 +1588,7 @@ function setDistLabel() {
   for (const b of ui.presets.children) b.setAttribute("aria-pressed", String(+b.dataset.v === v));
 }
 function wire() {
-  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), gen: $("gen"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
+  Object.assign(ui, { dist: $("dist"), distVal: $("dist-val"), pref: $("pref"), lights: $("lights"), gen: $("gen"), actual: $("actual"), delta: $("delta"), bar: $("bar"), legend: $("legend"), turns: $("turns"),
     undo: $("undo"), fitDist: $("fit-dist"), gpx: $("gpx"), gmaps: $("gmaps"), kml: $("kml"), homeLabel: $("home-label"), moveHome: $("move-home"), status: $("status"), presets: $("presets"),
     pill: $("distpill"), pillKm: $("pill-km"), pillDelta: $("pill-delta"), autoFit: $("auto-fit"),
     saveName: $("save-name"), saveBtn: $("save-btn"), savedList: $("saved-list"), savedNote: $("saved-note"), gmapsNote: $("gmaps-note") });
@@ -1532,6 +1605,7 @@ function wire() {
   $("dist-minus").onclick = () => { ui.dist.value = Math.max(2, Math.round((+ui.dist.value - 0.5) * 2) / 2); onDist(false); };
   $("dist-plus").onclick = () => { ui.dist.value = Math.min(45, Math.round((+ui.dist.value + 0.5) * 2) / 2); onDist(false); };
   ui.pref.addEventListener("change", () => { setPref(+ui.pref.value / 100); save({ pref: +ui.pref.value }); generate(); });
+  ui.lights.addEventListener("change", () => { setLights(+ui.lights.value / 100); save({ lights: +ui.lights.value }); generate(); });
   ui.gen.onclick = nextLoop;
   ui.undo.onclick = undo;
   ui.fitDist.onclick = matchDistance;
@@ -1600,8 +1674,9 @@ async function boot() {
   const st = store();
   if (st.dist) ui.dist.value = st.dist;
   if (st.pref != null) ui.pref.value = st.pref;
+  if (st.lights != null) ui.lights.value = st.lights;
   if (st.autoFit === false) ui.autoFit.checked = false;
-  setDistLabel(); setPref(+ui.pref.value / 100);
+  setDistLabel(); setPref(+ui.pref.value / 100); setLights(+ui.lights.value / 100);
   resize();
   try {
     // map-data.bin.wasm: the same bytes, for hosts that only serve known file types (Claude artifacts)

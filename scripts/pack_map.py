@@ -65,6 +65,10 @@ arrays = [
     ("parkPoly", ppoff), ("parkRing", proff), ("parkD", pdel.astype(np.int32)),
     ("gD", gdel.astype(gtype)), ("en", en), ("ecode", ecode),
 ]
+if "signals" in d:  # traffic lights and stop signs (add_signals.py): groups of points
+    sg = d["signals"]
+    arrays += [("sigOff", np.asarray(sg["off"], dtype=np.uint32)), ("sigD", np.asarray(sg["pts"], dtype=np.int32)),
+               ("sigK", np.asarray(sg["kinds"], dtype=np.uint8))]
 meta = {k: d[k] for k in ("source", "origin", "scale", "bbox", "home", "cats", "names")}
 meta.update(kx=kx, ky=ky, n=len(nodes), m=m,
             arrays=[[name, a.dtype.name, int(a.size)] for name, a in arrays])

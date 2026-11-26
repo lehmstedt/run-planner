@@ -5,6 +5,7 @@ A running-route planner that runs entirely offline, in a Claude artifact or as a
 - Pick a distance and it builds a loop from home (default: 5e Avenue, Verdun, H4G 2Z5).
 - Routing favours cycle paths and park trails over car roads (the "Path preference" slider sets how strongly).
 - Loops have as few corners as possible: the router will run about 300 m further to avoid a right-angle turn, loops are ranked by corners per km, half the candidate loops use one via point less, and free via points slide to where the route runs straight through them (without leaving the target distance). Direction changes are measured across short connectors, so crossing a street to carry on the same way isn't a corner, while turning back (a hairpin, or crossing to the other sidewalk to come back the way you came) costs a lot, also where one leg hands over to the next. The loop summary counts corners and turn-backs.
+- Fewer interruptions: loops avoid traffic lights (junctions and signalised crossings) and, less strongly, stop signs. "Avoid traffic lights" sets how much further the router will run to skip one (up to 600 m per light at full, a fifth of that per stop sign; 70% by default). Lights are only charged where you cross or run through the junction: running past it on a sidewalk is free. The loop summary counts traffic lights and stop signs, and the lights on the loop show as red dots when zoomed in. Skipping lights often means a few more corners through quiet side streets; slide it down to trade back.
 - On phones the controls are a bottom sheet: distance and the loop buttons stay visible; tap or swipe up "More options" for the rest, touch the map to fold it away.
 - Drag the route line to pull it through a new point (up to 9 points, the most a Google Maps link takes), drag a white dot to move it, tap a dot to remove it.
 - "Fit to distance" rescales an edited loop back to the target; "Export GPX" saves it for a watch; "Export for My Maps" saves a KML file (styled route, start pin, km markers) to import into Google My Maps (Create a new map → Import).
@@ -28,7 +29,7 @@ Published: `index.html`, `map-data.bin`, `manifest.webmanifest`, `sw.js` and `ic
 ## Files
 
 - `index.html` – the app (canvas map + A* routing in the browser). The base map is drawn once into cached tiles per zoom level, so panning and pinching only copy images.
-- `map-data.bin` – what the app loads: the routing graph, water and parks for southwest Montréal, downtown, the Plateau and the islands (about 25 × 22 km, enough for marathon loops), as gzipped delta-coded typed arrays (2.7 MB).
+- `map-data.bin` – what the app loads: the routing graph, traffic lights and stop signs, water and parks for southwest Montréal, downtown, the Plateau and the islands (about 25 × 22 km, enough for marathon loops), as gzipped delta-coded typed arrays (2.8 MB).
 - `map-data.json` – the same data as JSON, the source `map-data.bin` is packed from.
 - `manifest.webmanifest`, `sw.js`, `icons/` – make it an installable, offline app.
 - `scripts/` – rebuilds the map from Overture Maps (OpenStreetMap-based) GeoParquet on AWS Open Data:
@@ -38,6 +39,7 @@ pip install pyarrow requests shapely
 python3 scripts/fetch_segments.py /tmp/osm/segments.parquet
 python3 scripts/fetch_context.py /tmp/osm
 python3 scripts/build_map.py /tmp/osm map-data.json
+python3 scripts/add_signals.py /tmp/osm map-data.json
 python3 scripts/pack_map.py map-data.json map-data.bin
 ```
 
